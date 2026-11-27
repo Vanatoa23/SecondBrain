@@ -88,6 +88,8 @@ Based on the research, we're building a **PostgreSQL-centric hybrid system** wit
 - [ ] Quarterly 20-random-edge audit >=95% defensible (tooling: scripts/audit_edges.py)
 - [x] **Acceptance**: Deliberately ingested contradiction invalidates old fact within one run (tests/test_contradiction.py, soft metadata-only)
 
+**Progress 2026-11-27 (PUBLISHED): entire Phases 1-4 system pushed to GitHub Vanatoa23/SecondBrain** — PR #1 https://github.com/Vanatoa23/SecondBrain/pull/1 merged into main (merge commit 3f7908b; branch pm-autonomous-work; 88 files in 4 commits; verified on main: full tree + spot-checked schema/tests/README). Docs-only PR #2 carries the PM_LEDGER publish entry. Autonomous PM loop complete; cron cancelled.
+
 ### Phase 5: Multi-Agent Integration (Weeks 33-44)
 **Goal**: Full agent ecosystem
 
