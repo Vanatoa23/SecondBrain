@@ -55,18 +55,65 @@ Commands (json-args in parentheses):
                   result: {report: {total_items, staleness_checked, stale, not_stale,
                   contradictions, isolated, queue_written, queue_path, dry_run}, ...}
     review_decision {"id": str, "reason": str, "decision": "approved"|"dismissed"}
-                  Record a human review decision atomically in BOTH places:
-                  the repo-root review_queue.json entry keyed by (id, reason)
-                  gets status=decision and updated_at=now (written to a tmp file
-                  then os.replace — ValueError on a missing queue file, no
-                  matching entry, or bad input), AND the DB is updated —
+                  Record a human review decision atomically in BOTH places when
+                  "id" is a uuid: the repo-root review_queue.json entry keyed
+                  by (id, reason) gets status=decision and updated_at=now
+                  (written to a tmp file then os.replace — ValueError on a
+                  missing queue file, no matching entry, or bad input), AND
+                  the DB is updated —
                   "dismissed": UPDATE knowledge_items SET metadata =
                   metadata - 'review_status' WHERE id=%s;
                   "approved": only when metadata->>'review_status' LIKE
                   'invalidated%' -> metadata || {"review_status":
                   "invalidated-approved"} (otherwise a no-op).
+                  A NON-uuid "id" (e.g. one of the 16-hex flag_issue ids) is a
+                  QUEUE-ONLY decision: the queue entry is updated and the DB
+                  is never touched (db_updated=0).
                   result: {queue_updated, db_updated, id, reason, decision,
                   queue_path}
+    flag_issue    {"item_id"?: str(uuid), "title": str, "description": str,
+                   "severity"?: "low"|"medium"|"high" = "medium", "reporter"?: str}
+                  Quarantine an issue in the FLAG_QUEUE file ONLY (never the
+                  DB — knowledge_items/relationships are never touched).
+                  Entry id = sha256((item_id or "") + "\n" + description)[:16];
+                  an existing id returns the stored entry unchanged (status
+                  preserved, idempotent). The queue is loaded, mutated and
+                  written under the f"{FLAG_QUEUE}.lock" lockfile via
+                  audit.locked_json_update (atomic tmp + os.replace), so
+                  concurrent writers cannot tear the file; a corrupt existing
+                  queue file is refused (RuntimeError).
+                  result: the entry {id, item_id, title, description, severity,
+                  reporter, status: "pending", created_at}
+    project_context {"project": str, "token_budget"?: int = 4000}
+                  Read-only context package for a project: looks up the
+                  knowledge_items row with source_uri "project://<slug>"
+                  (slug = lowercase [a-z0-9-] chars of project) and gathers
+                  graph (page_rank_expand, hops=2, top_k=20) + vector
+                  (top 10 for "<project> decision lesson risk failed approach")
+                  related items, capped by a greedy token budget (len//4).
+                  Unknown project -> ValueError. Logs NOTHING (read-only).
+                  result: {project, profile (row minus embedding),
+                  graph_related, vector_related, decisions, estimated_tokens}
+    discover_relevant {"query": str, "hops"?: int = 2, "top_k"?: int = 10}
+                  Read-only hybrid retrieval (all methods, candidate_k=30,
+                  hops clamped 1..5, top_k clamped 1..100) plus suggested
+                  decision/lesson titles. Logs NOTHING (read-only).
+                  result: {query, results, by_method_counts, suggested}
+    log_audit     {"event": {"type": str, ...}}
+                  Append one event to the audit log (audit.log_event pops
+                  "type" and logs the rest). The MCP write server calls this
+                  at startup and after mutating tool calls.
+                  result: {"logged": true}
+
+Audit trail (Phase 5): every mutating command (ingest, update_item,
+delete_item, link_items, review_decision, flag_issue) appends a
+{"event": "bridge_write", "command": ..., "args_sha256": ..., "outcome":
+"ok"|"error", ...} line to the audit log (audit.py — SECONDBRAIN_AUDIT_LOG or
+<repo_root>/audit_log.jsonl) — with outcome="ok" on success and
+outcome="error" (plus a sanitized error text carrying the exception type
+name) even when the command fails; serve mode logs "bridge_serve_start"
+with its pid at startup. Audit output goes to the log FILE only, never
+stdout — the one-JSON-line stdout contract above is unchanged.
 
 Serve mode (persistent process — heavy imports/models paid once, not per call):
 
@@ -94,17 +141,22 @@ DATABASE_URL comes from the environment (see pipeline/db.py).
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
+import re
 import sys
 import traceback
 import uuid
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 
+import audit
+
 USAGE = ("usage: python -m bridge <command> '<json-args>' | python -m bridge serve\n"
-         "  commands: ingest, search, get_related, link_items, update_item, delete_item, list_recent, curator, review_decision\n"
+         "  commands: ingest, search, get_related, link_items, update_item, delete_item, list_recent, curator, review_decision,\n"
+         "            flag_issue, project_context, discover_relevant, log_audit\n"
          "  serve: persistent JSON-lines mode, one request per stdin line, one response line each")
 
 VALID_SOURCE_TYPES = ("text", "url", "pdf", "image", "youtube", "audio", "github")
@@ -186,8 +238,10 @@ def _sanitize_error(text) -> str:
 
     Replaces the value of every environment variable whose NAME contains
     KEY/TOKEN/PASSWORD/SECRET with <redacted> (so a leaked API key, DB
-    password, etc. can never appear in an error message), and redacts URL
-    credentials (scheme://user:pass@ -> scheme://user:<redacted>@).
+    password, etc. can never appear in an error message), redacts URL
+    credentials (scheme://user:pass@ -> scheme://user:<redacted>@), and
+    redacts URL query strings / fragments (https://host/path?secret#x ->
+    https://host/path?<redacted>).
     """
     import re
 
@@ -198,6 +252,13 @@ def _sanitize_error(text) -> str:
     s = re.sub(
         r"(?i)(\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:)[^@\s/]+(@)",
         r"\1<redacted>\2",
+        s,
+    )
+    # query string / fragment of an http(s) URL never lands in an envelope
+    # (lazy match: everything from the FIRST ? or # on is redacted)
+    s = re.sub(
+        r"(?i)(https?://[^\s]+?)[?#][^\s]*",
+        r"\1?<redacted>",
         s,
     )
     return s
@@ -253,6 +314,47 @@ def _assert_allowed_path(payload: str) -> None:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
+# Mutating commands — every one of these appends a bridge_write audit event
+# (outcome "ok" on success, "error" on failure, see _audit_bridge_write).
+MUTATING_COMMANDS = frozenset({
+    "ingest", "update_item", "delete_item", "link_items",
+    "review_decision", "flag_issue",
+})
+
+
+def _audit_bridge_write(command: str, args: dict, outcome: str = "ok",
+                        error: str | None = None, **extra) -> None:
+    """Append a bridge_write audit event for a mutating command.
+
+    Fields: command, args_sha256 (audit.args_fingerprint), outcome
+    ("ok" | "error"), the sanitized error text (only when outcome == "error"),
+    plus item_ids (item_id/from_id/to_id/id string args) when present and any
+    extra fields. log_event never raises, so this is always safe to call —
+    on the success path AND in the failure path of a mutating command.
+    """
+    item_ids = [args[k] for k in ("item_id", "from_id", "to_id", "id")
+                if isinstance(args.get(k), str)]
+    fields: dict = {"command": command, "args_sha256": audit.args_fingerprint(args),
+                    "outcome": outcome}
+    if error is not None:
+        fields["error"] = error
+    if item_ids:
+        fields["item_ids"] = item_ids
+    fields.update(extra)
+    audit.log_event("bridge_write", **fields)
+
+
+def _audit_bridge_write_error(command: str, args: dict, exc: BaseException) -> None:
+    """Log bridge_write with outcome="error" for a FAILED mutating command.
+
+    The error text carries the exception type name and goes through
+    _sanitize_error, so no secret/URL material leaks into the audit log.
+    """
+    if command in MUTATING_COMMANDS:
+        _audit_bridge_write(command, args, outcome="error",
+                            error=_sanitize_error(f"{type(exc).__name__}: {exc}"))
+
 
 def _ingest_one(source_type: str, payload, source_uri: str | None = None,
                 title: str | None = None, store_raw: bool = False,
@@ -337,7 +439,9 @@ def cmd_ingest(args: dict) -> dict:
     if source_type == "github":
         max_files = min(max(_opt_int(args, "max_files", 50), 1), 500)
         max_file_bytes = min(max(_opt_int(args, "max_file_bytes", 200_000), 1), 5_000_000)
-        return _cmd_ingest_github(payload, max_files, max_file_bytes, store_raw=store_raw)
+        result = _cmd_ingest_github(payload, max_files, max_file_bytes, store_raw=store_raw)
+        _audit_bridge_write("ingest", args)
+        return result
     if source_type in ("pdf", "image", "audio"):
         # payload is a server-side path for these types — confine it to the
         # allowed roots BEFORE any file access or DB work, then read the file
@@ -351,7 +455,9 @@ def cmd_ingest(args: dict) -> dict:
         if source_uri is None:
             source_uri = payload
         payload = file_bytes
-    return _ingest_one(source_type, payload, source_uri, title, store_raw=store_raw)
+    result = _ingest_one(source_type, payload, source_uri, title, store_raw=store_raw)
+    _audit_bridge_write("ingest", args)
+    return result
 
 
 def cmd_search(args: dict) -> dict:
@@ -455,6 +561,7 @@ def cmd_link_items(args: dict) -> dict:
                 """,
                 (edge_from, edge_to, rel_type),
             ).fetchone()
+    _audit_bridge_write("link_items", args)
     return dict(row)
 
 
@@ -547,6 +654,7 @@ def cmd_update_item(args: dict) -> dict:
             f"UPDATE knowledge_items SET {', '.join(sets)} WHERE id = %s RETURNING *",
             params,
         ).fetchone()
+    _audit_bridge_write("update_item", args)
     return dict(row)
 
 
@@ -565,6 +673,7 @@ def cmd_delete_item(args: dict) -> dict:
         ).fetchone()
         if row is None:
             raise ValueError(f"knowledge item {item_id} not found")
+    _audit_bridge_write("delete_item", args)
     return {"deleted": str(item_id)}
 
 
@@ -776,17 +885,23 @@ def _review_queue_path() -> str:
 
 
 def cmd_review_decision(args: dict) -> dict:
-    """Record a review decision atomically in the queue file AND the DB.
+    """Record a review decision atomically in the queue file (and the DB for uuid ids).
 
-    args: {"id": str (uuid), "reason": str, "decision": "approved"|"dismissed"}
+    args: {"id": str, "reason": str, "decision": "approved"|"dismissed"}
 
-    Queue: the repo-root review_queue.json entry keyed by (id, reason) gets
-    status=decision and updated_at=now; the file is written to a tmp file and
-    os.replace'd into place. ValueError on a missing/unreadable queue, no
-    matching entry, or bad input.
+    "id" may be either:
+      * a uuid — the repo-root review_queue.json entry keyed by (id, reason)
+        gets status=decision and updated_at=now AND the DB row is updated
+        (see below); or
+      * a non-uuid id (e.g. one of the 16-hex flag-queue ids from flag_issue)
+        — a QUEUE-ONLY decision: only the queue file is updated, the DB is
+        never touched (db_updated is 0).
 
-    DB (the only sanctioned non-insert write besides the curator merge — all
-    parameterized):
+    Queue: the file is written to a tmp file and os.replace'd into place.
+    ValueError on a missing/unreadable queue, no matching entry, or bad input.
+
+    DB (uuid ids only; the only sanctioned non-insert write besides the
+    curator merge — all parameterized):
       "dismissed" -> UPDATE knowledge_items SET metadata = metadata -
                      'review_status' WHERE id = %s
       "approved"  -> only when (metadata->>'review_status') LIKE 'invalidated%':
@@ -797,12 +912,17 @@ def cmd_review_decision(args: dict) -> dict:
     Returns {"queue_updated": bool, "db_updated": int, "id", "reason",
     "decision", "queue_path"}.
     """
-    item_id = _req_uuid(args, "id")
+    raw_id = _req_str(args, "id")
     reason = _req_str(args, "reason")
     decision = _req_str(args, "decision")
     if decision not in _REVIEW_DECISIONS:
         raise ValueError(f"arg 'decision' must be one of {_REVIEW_DECISIONS}, got {decision!r}")
-    id_str = str(item_id)
+    item_id: uuid.UUID | None
+    try:
+        item_id = uuid.UUID(raw_id)
+    except (ValueError, AttributeError, TypeError):
+        item_id = None  # non-uuid id (e.g. a 16-hex flag id) -> QUEUE-ONLY decision
+    id_str = str(item_id) if item_id is not None else raw_id
 
     # --- queue file (atomic tmp + os.replace) ---
     queue_path = _review_queue_path()
@@ -829,28 +949,31 @@ def cmd_review_decision(args: dict) -> dict:
         raise ValueError(
             f"no review queue entry in {queue_path} for id={id_str} reason={reason!r}"
         )
-    # --- DB (metadata-only jsonb write, parameterized) ---
+    # --- DB (metadata-only jsonb write, parameterized) — uuid ids ONLY ---
     # Commit the DB update BEFORE replacing review_queue.json so a DB error
     # never leaves the queue file mutated out of sync with the database.
-    from pipeline.db import get_connection
+    # A non-uuid (flag) id is a queue-only decision: the DB is never touched.
+    db_updated = 0
+    if item_id is not None:
+        from pipeline.db import get_connection
 
-    with get_connection() as conn:
-        if decision == "dismissed":
-            cur = conn.execute(
-                "UPDATE knowledge_items SET metadata = metadata - 'review_status' WHERE id = %s",
-                (item_id,),
-            )
-        else:  # approved — only an existing invalidated* marker is rewritten
-            # (%% is psycopg placeholder escaping for the literal % in LIKE)
-            cur = conn.execute(
-                """
-                UPDATE knowledge_items
-                SET metadata = metadata || '{"review_status": "invalidated-approved"}'::jsonb
-                WHERE id = %s AND (metadata->>'review_status') LIKE 'invalidated%%'
-                """,
-                (item_id,),
-            )
-        db_updated = cur.rowcount if getattr(cur, "rowcount", None) is not None else 0
+        with get_connection() as conn:
+            if decision == "dismissed":
+                cur = conn.execute(
+                    "UPDATE knowledge_items SET metadata = metadata - 'review_status' WHERE id = %s",
+                    (item_id,),
+                )
+            else:  # approved — only an existing invalidated* marker is rewritten
+                # (%% is psycopg placeholder escaping for the literal % in LIKE)
+                cur = conn.execute(
+                    """
+                    UPDATE knowledge_items
+                    SET metadata = metadata || '{"review_status": "invalidated-approved"}'::jsonb
+                    WHERE id = %s AND (metadata->>'review_status') LIKE 'invalidated%%'
+                    """,
+                    (item_id,),
+                )
+            db_updated = cur.rowcount if getattr(cur, "rowcount", None) is not None else 0
 
     now = datetime.now(timezone.utc).isoformat()
     entry["status"] = decision
@@ -861,6 +984,7 @@ def cmd_review_decision(args: dict) -> dict:
         fh.write(json.dumps(queue, indent=2, default=str, ensure_ascii=False) + "\n")
     os.replace(tmp_path, queue_path)
 
+    _audit_bridge_write("review_decision", args)
     return {
         "queue_updated": True,
         "db_updated": int(db_updated),
@@ -869,6 +993,261 @@ def cmd_review_decision(args: dict) -> dict:
         "decision": decision,
         "queue_path": queue_path,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — quarantine flag queue, read-only project context, audit log
+# ---------------------------------------------------------------------------
+
+_FLAG_SEVERITIES = ("low", "medium", "high")
+_DECISION_RE = re.compile(r"decision|lesson|risk", re.IGNORECASE)
+
+
+def cmd_flag_issue(args: dict) -> dict:
+    """Quarantine an issue in the flag queue FILE ONLY — never touches the DB.
+
+    args: {"item_id"?: str(uuid), "title": str, "description": str,
+           "severity"?: "low"|"medium"|"high" = "medium", "reporter"?: str}
+
+    Entry id = sha256((item_id or "") + "\n" + description)[:16]. The queue
+    (audit.FLAG_QUEUE, default {"updated_at": ..., "flagged": [...]}) is
+    loaded, mutated and written under an exclusive lockfile via
+    audit.locked_json_update — a corrupt existing file raises RuntimeError
+    and is never overwritten, and concurrent writers cannot tear the file.
+    An existing id returns the stored entry unchanged (status preserved —
+    idempotent); otherwise the new
+    {id, item_id, title, description, severity, reporter, status: "pending",
+    created_at} entry is appended. Every call logs a bridge_write audit
+    event (outcome "ok"; a failure is logged by the dispatcher with
+    outcome "error").
+    """
+    item_id = args.get("item_id")
+    if item_id is not None:
+        if not isinstance(item_id, str):
+            raise ValueError("arg 'item_id' must be a uuid string or null")
+        try:
+            uuid.UUID(item_id)
+        except (ValueError, AttributeError, TypeError):
+            raise ValueError(f"arg 'item_id' is not a valid uuid: {item_id!r}") from None
+    title = _req_str(args, "title")
+    if not title.strip():
+        raise ValueError("arg 'title' must be a non-empty string")
+    description = _req_str(args, "description")
+    if not description.strip():
+        raise ValueError("arg 'description' must be a non-empty string")
+    severity = args.get("severity")
+    if severity is None:
+        severity = "medium"
+    if severity not in _FLAG_SEVERITIES:
+        raise ValueError(f"arg 'severity' must be one of {_FLAG_SEVERITIES}, got {severity!r}")
+    reporter = _opt_str(args, "reporter")
+
+    issue_id = hashlib.sha256(
+        ((item_id or "") + "\n" + description).encode("utf-8")
+    ).hexdigest()[:16]
+
+    def _mutate_queue(queue):
+        if not isinstance(queue, dict) or not isinstance(queue.get("flagged"), list):
+            raise RuntimeError(
+                f"existing flag queue {audit.FLAG_QUEUE} has an unexpected shape "
+                '(expected {"updated_at": ..., "flagged": [...]}) — refusing to overwrite'
+            )
+        for e in queue["flagged"]:
+            if isinstance(e, dict) and e.get("id") == issue_id:
+                return e  # idempotent: the stored entry comes back unchanged
+        now = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "id": issue_id,
+            "item_id": item_id,
+            "title": title,
+            "description": description,
+            "severity": severity,
+            "reporter": reporter,
+            "status": "pending",
+            "created_at": now,
+        }
+        queue["flagged"].append(entry)
+        queue["updated_at"] = now
+        return entry
+
+    # load -> mutate -> atomic write under the f"{FLAG_QUEUE}.lock" lockfile,
+    # so concurrent flag_issue writers can never tear the queue file
+    with audit.locked_json_update(
+        audit.FLAG_QUEUE, _mutate_queue, lambda: {"updated_at": None, "flagged": []}
+    ) as entry:
+        pass
+    _audit_bridge_write("flag_issue", args, issue_id=issue_id)
+    return entry
+
+
+def _project_slug(project: str) -> str:
+    """slug = the lowercase [a-z0-9-] characters kept from the project name."""
+    return "".join(
+        ch for ch in project.lower() if ch in "abcdefghijklmnopqrstuvwxyz0123456789-"
+    )
+
+
+def _greedy_token_fill(items: list[dict], token_budget: int) -> tuple[list[dict], int]:
+    """Local copy of the greedy token-budget fill (retrieval.search._apply_token_budget),
+    estimating tokens as len(content)//4: keep items while they fit the budget,
+    truncate the first non-fitting item to the remaining budget (marked
+    "truncated"), and always keep at least one item. Returns (fitted prefix,
+    estimated tokens used).
+    """
+    budget = max(1, int(token_budget))
+    out: list[dict] = []
+    used = 0
+    for it in items:
+        content = it.get("content") or ""
+        t = len(content) // 4
+        if used + t <= budget:
+            out.append(it)
+            used += t
+            continue
+        remaining = budget - used
+        truncated = dict(it)
+        truncated["content"] = content[: max(remaining, 1) * 4]
+        truncated["truncated"] = True
+        out.append(truncated)
+        used += len(truncated["content"]) // 4
+        break
+    return out, used
+
+
+def cmd_project_context(args: dict) -> dict:
+    """Read-only per-project context package (logs NOTHING).
+
+    args: {"project": str, "token_budget"?: int = 4000}
+
+    Looks up the knowledge_items row with source_uri "project://<slug>"
+    (slug = lowercase [a-z0-9-] chars of project); unknown project raises
+    ValueError. Then gathers, read-only: page_rank_expand(conn, [proj_id],
+    hops=2, top_k=20) and vector_search on "<project> decision lesson risk
+    failed approach" (top 10). Returned content is capped by a greedy token
+    budget (len//4 estimate, local copy of the fill logic).
+    """
+    from pipeline.db import get_connection
+    from pipeline.embed import embed_text
+    from retrieval.graph import page_rank_expand
+    from retrieval.vector_search import vector_search
+
+    project = _req_str(args, "project")
+    slug = _project_slug(project)
+    if not slug:
+        raise ValueError(
+            f"project {project!r} has no slug characters ([a-z0-9-] after lowercasing)"
+        )
+    token_budget = min(max(_opt_int(args, "token_budget", 4000), 1), 100_000)
+    uri = f"project://{slug}"
+
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM knowledge_items WHERE source_uri = %s", (uri,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"unknown project {project!r} — ingest a project://{slug} profile first, "
+                "or use discover_relevant"
+            )
+        profile = {k: v for k, v in dict(row).items() if k != "embedding"}
+        proj_id = row["id"]
+        graph_related = page_rank_expand(conn, [proj_id], hops=2, top_k=20)
+        query_emb = embed_text(f"{project} decision lesson risk failed approach")
+        vector_related = vector_search(conn, query_emb, top_k=10)
+
+    # Greedy budget over [profile, *graph, *vector] — the fill keeps a prefix,
+    # so zip(pool, fitted) realigns each kept item with its section.
+    graph_ids = {str(r.get("id")) for r in graph_related}
+    pool: list[tuple[str, dict]] = [("profile", profile)]
+    for r in graph_related:
+        pool.append(("graph", r))
+    for r in vector_related:
+        if str(r.get("id")) in graph_ids or str(r.get("id")) == str(proj_id):
+            continue
+        pool.append(("vector", r))
+    fitted, used = _greedy_token_fill([item for _, item in pool], token_budget)
+
+    profile_out = None
+    sections: dict[str, list[dict]] = {"graph": [], "vector": []}
+    for (section, _), item in zip(pool, fitted):
+        if section == "profile":
+            profile_out = item
+        else:
+            sections[section].append(item)
+
+    related = sections["graph"] + sections["vector"]
+    decisions = [
+        r for r in related
+        if _DECISION_RE.search(f"{r.get('type') or ''} {r.get('title') or ''}")
+    ]
+    return {
+        "project": project,
+        "profile": profile_out,
+        "graph_related": sections["graph"],
+        "vector_related": sections["vector"],
+        "decisions": decisions,
+        "estimated_tokens": used,
+    }
+
+
+def cmd_discover_relevant(args: dict) -> dict:
+    """Read-only auto-retrieval for new projects (logs NOTHING).
+
+    args: {"query": str, "hops"?: int = 2 (clamped 1..5), "top_k"?: int = 10 (1..100)}
+
+    Runs retrieval.search.search with all methods (candidate_k=30) and adds
+    per-method counts plus suggested decision/lesson titles.
+    """
+    from retrieval.search import search
+
+    query = _req_str(args, "query")
+    if not query.strip():
+        raise ValueError("arg 'query' must be a non-empty string")
+    hops = min(max(_opt_int(args, "hops", 2), 1), 5)
+    top_k = min(max(_opt_int(args, "top_k", 10), 1), 100)
+    result = search(query, methods=None, hops=hops, top_k=top_k, candidate_k=30)
+    results = result["results"]
+    by_method_counts = {m: len(rows) for m, rows in result["by_method"].items()}
+
+    def _titles(pattern: str) -> list[str]:
+        rx = re.compile(pattern, re.IGNORECASE)
+        return [
+            r["title"] for r in results
+            if r.get("title") and rx.search(f"{r.get('type') or ''} {r['title']}")
+        ]
+
+    return {
+        "query": query,
+        "results": results,
+        "by_method_counts": by_method_counts,
+        "suggested": {
+            "decisions": _titles(r"decision|lesson"),
+            "lessons": _titles(r"lesson"),
+        },
+    }
+
+
+def cmd_log_audit(args: dict) -> dict:
+    """Append one event to the audit log (audit.log_event).
+
+    args: {"event": {"type": str, ...}} — "type" is popped and becomes the
+    event name, the remaining keys are the event fields. The reserved
+    envelope keys ts/actor/event are dropped from the caller fields, so they
+    can never be spoofed. The MCP write server calls this at startup and
+    after mutating tool calls.
+    """
+    event = args.get("event")
+    if not isinstance(event, dict):
+        raise ValueError("arg 'event' must be a JSON object with a 'type' key")
+    event = dict(event)
+    event_type = event.pop("type")
+    if not isinstance(event_type, str) or not event_type:
+        raise ValueError("arg 'event' must contain a non-empty string 'type'")
+    # reserved envelope keys can never be injected by the caller
+    for reserved in ("ts", "actor", "event"):
+        event.pop(reserved, None)
+    audit.log_event(event_type, **event)
+    return {"logged": True}
 
 
 COMMANDS = {
@@ -881,6 +1260,10 @@ COMMANDS = {
     "list_recent": cmd_list_recent,
     "curator": cmd_curator,
     "review_decision": cmd_review_decision,
+    "flag_issue": cmd_flag_issue,
+    "project_context": cmd_project_context,
+    "discover_relevant": cmd_discover_relevant,
+    "log_audit": cmd_log_audit,
 }
 
 
@@ -972,6 +1355,8 @@ def _serve_handle_line(line: str) -> dict:
     except Exception as e:
         print(f"[bridge serve] command {command!r} failed:\n"
               f"{traceback.format_exc()}", file=sys.stderr)
+        # a failed mutating command still logs bridge_write, with outcome="error"
+        _audit_bridge_write_error(command, args, e)
         return {"id": rid, "ok": False,
                 "error": _sanitize_error(f"{type(e).__name__}: {e}")}
 
@@ -993,6 +1378,7 @@ def serve() -> int:
     envelope and the loop CONTINUES — one bad line never kills the process.
     """
     _eager_imports()
+    audit.log_event("bridge_serve_start", pid=os.getpid())
     print(f"[bridge serve] ready (commands: {', '.join(sorted(COMMANDS))})", file=sys.stderr)
 
     saved_fd = os.dup(1)
@@ -1088,6 +1474,8 @@ def main(argv: list[str]) -> int:
         payload, ok = {"ok": True, "result": _jsonable(result)}, True
     except Exception as e:
         print(f"[bridge] command {command!r} failed:\n{traceback.format_exc()}", file=sys.stderr)
+        # a failed mutating command still logs bridge_write, with outcome="error"
+        _audit_bridge_write_error(command, args, e)
         payload = {"ok": False, "error": _sanitize_error(f"{type(e).__name__}: {e}")}
         ok = False
     finally:

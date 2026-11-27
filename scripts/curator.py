@@ -26,6 +26,16 @@ Steps:
      {reason: "superseded"/"contradiction"} for invalidation review.
   3. GAP DETECTION — items with zero relationships (neither from_id nor to_id)
      are flagged {reason: "isolated"}.
+  3b. FLAG-QUEUE PICKUP — the quarantine flag queue at audit.FLAG_QUEUE
+     (env SECONDBRAIN_FLAG_QUEUE or <repo>/flagged_issues.json, written by
+     bridge flag_issue) is loaded when it exists; every entry becomes a
+     queue flag {reason: "flagged-issue", id: item_id or entry id, evidence:
+     "<description> (severity=..., reporter=..., issue=...)"}. merge_queue
+     keys by (id, reason), so these integrate idempotently. When the audit
+     module is not importable, this step is skipped. DECISION BACK-FILL: if
+     the merged queue has a DECIDED (approved/dismissed) entry for
+     (id, "flagged-issue"), the quarantine entry's status is set to that
+     decision and the flag queue is written atomically (never in --dry-run).
   4. REVIEW QUEUE — the flags are merged into the queue JSON at --queue
      (default review_queue.json in the CWD):
          {"updated_at": <iso>, "flagged": [{id, title, source_uri, reason,
@@ -33,8 +43,12 @@ Steps:
      Merging keeps existing decisions intact: entries whose status is
      "approved"/"dismissed" are preserved untouched; pending entries are
      re-flagged (evidence refreshed, still pending, never duplicated);
-     new flags are appended as pending. The queue file is a RUNTIME artifact
-     (gitignored). --dry-run prints everything and writes NOTHING.
+     new flags are appended as pending. The load-merge-write runs under an
+     exclusive lock (audit.locked_json_update, atomic write via
+     audit.write_json_atomic) so concurrent bridge/curator writers cannot
+     tear the file or lose updates (audit-A finding 5). The queue file is a
+     RUNTIME artifact (gitignored). --dry-run prints everything and writes
+     NOTHING.
   5. INVALIDATION (soft — NEVER deletes) — for each contradiction pair where
      one item is clearly newer (created_at; ties broken by higher
      distillation_score), the older/lower item gets
@@ -60,10 +74,13 @@ below mirrors retrieval/merge.py is_stale() exactly.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import sys
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -74,11 +91,14 @@ DEFAULT_QUEUE = "review_queue.json"
 REVIEW_STATUS_INVALIDATED = "invalidated-pending-review"
 DECIDED_STATUSES = ("approved", "dismissed")
 VERSION_EDGE_TYPES = ("supersedes", "contradicts")
+FLAG_REASON = "flagged-issue"  # reason used for quarantine flag-queue entries
 
 USAGE = ("usage: python scripts/curator.py [--queue review_queue.json] [--dry-run]\n"
          "  reads TEST_DATABASE_URL (tests) or DATABASE_URL (ops) from the env;\n"
-         "  scans staleness/contradictions/gaps, merges review_queue.json, and\n"
-         "  soft-invalidates clearly-superseded contradiction losers (metadata only)")
+         "  scans staleness/contradictions/gaps, merges review_queue.json, merges\n"
+         "  the audit flag queue (audit.FLAG_QUEUE) as reason \"flagged-issue\" and\n"
+         "  back-fills decided statuses into it, and soft-invalidates clearly-\n"
+         "  superseded contradiction losers (metadata only)")
 
 
 # ---------------------------------------------------------------------------
@@ -428,10 +448,217 @@ def merge_queue(existing: dict, new_flags: list[dict], now: datetime) -> dict:
 
 
 def write_queue_atomic(queue_path: Path, queue: dict) -> None:
+    """Atomic queue write: audit.write_json_atomic (unique tmp + fsync + 0600)
+    when the audit module is available (audit-A finding 5); otherwise a local
+    fallback that still uses a UNIQUE tmp name + fsync before os.replace, so
+    concurrent writers can never tear the file or clobber each other's tmp."""
+    audit = _load_audit()
+    if audit is not None and hasattr(audit, "write_json_atomic"):
+        audit.write_json_atomic(str(queue_path), queue)
+        return
     payload = json.dumps(queue, indent=2, default=str, ensure_ascii=False) + "\n"
-    tmp = queue_path.with_name(queue_path.name + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
+    tmp = queue_path.with_name(
+        f"{queue_path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    )
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
     os.replace(tmp, queue_path)
+
+
+def _locked_json_update_local(path: Path, mutator, default_factory):
+    """Local stand-in for audit.locked_json_update (used only when the audit
+    module — or its locked_json_update — is unavailable): an exclusive lock
+    file guards load -> mutator -> atomic write, so concurrent bridge/curator
+    writers cannot tear or lose updates. A corrupt EXISTING file raises
+    RuntimeError (refuse-on-corrupt, same as audit.load_json_file)."""
+    path = Path(path)
+    lock_path = path.with_name(path.name + ".lock")
+    deadline = time.time() + 10.0
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, str(os.getpid()).encode("utf-8"))
+            finally:
+                os.close(fd)
+            break
+        except FileExistsError:
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"timed out acquiring lock {lock_path} — another writer holds it"
+                ) from None
+            time.sleep(0.02)
+    try:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                raise RuntimeError(
+                    f"existing file {path} is not readable JSON ({exc}) — "
+                    "refusing to overwrite it; fix or move it manually"
+                ) from None
+            if not isinstance(data, dict):
+                raise RuntimeError(
+                    f"existing file {path} has an unexpected shape — refusing to overwrite it"
+                ) from None
+        else:
+            data = default_factory()
+        mutator(data)
+        write_queue_atomic(path, data)
+        yield data
+    finally:
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
+
+
+def _locked_json_update(path, mutator, default_factory):
+    """Locked load-merge-write context manager (audit-A finding 5).
+
+    Uses audit.locked_json_update (the locked Phase 5 API: exclusive lock +
+    refuse-on-corrupt load + mutator + atomic write) when the audit module
+    provides it; otherwise falls back to the local equivalent
+    (_locked_json_update_local). Usage:
+
+        with _locked_json_update(path, mutator, default_factory) as data:
+            ...  # mutator has been applied under the lock; data is the result
+    """
+    audit = _load_audit()
+    if audit is not None:
+        fn = getattr(audit, "locked_json_update", None)
+        if fn is not None:
+            return fn(str(path), mutator, default_factory)
+    return _locked_json_update_local(Path(path), mutator, default_factory)
+
+
+_locked_json_update_local = contextlib.contextmanager(_locked_json_update_local)
+
+
+# ---------------------------------------------------------------------------
+# Quarantine flag queue (audit.FLAG_QUEUE — written by bridge flag_issue)
+# ---------------------------------------------------------------------------
+
+
+def _load_audit():
+    """Lazily import the repo-root `audit` module (Phase 5). Returns None
+    when it is not importable — flag pickup is then skipped gracefully."""
+    try:
+        import audit
+        return audit
+    except Exception:
+        return None
+
+
+def flag_queue_path():
+    """Path of the quarantine flag queue (audit.FLAG_QUEUE), or None."""
+    audit = _load_audit()
+    if audit is None:
+        return None
+    p = getattr(audit, "FLAG_QUEUE", None)
+    return Path(p) if p else None
+
+
+def load_flag_queue(path: Path | None) -> dict:
+    """Load the flag queue at `path` if it exists.
+
+    Shape: {"updated_at": ..., "flagged": [{id, item_id, title, description,
+    severity, reporter, status, created_at}]}. A missing file yields an empty
+    queue; a corrupt/unexpected file is reported on stderr and ignored (the
+    curator never crashes on it and never overwrites it).
+    """
+    empty = {"updated_at": None, "flagged": []}
+    if path is None or not path.exists():
+        return empty
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"WARNING: flag queue {path} is not readable JSON ({exc}) — ignoring it",
+              file=sys.stderr)
+        return empty
+    if not isinstance(data, dict) or not isinstance(data.get("flagged"), list):
+        print(f"WARNING: flag queue {path} has an unexpected shape — ignoring it",
+              file=sys.stderr)
+        return empty
+    return data
+
+
+def flag_queue_flags(flag_data: dict) -> list[dict]:
+    """Turn quarantine entries into review-queue flags (reason 'flagged-issue').
+
+    merge_queue keys by (id, reason), so these integrate idempotently with
+    the scan-produced flags.
+    """
+    flags: list[dict] = []
+    for entry in flag_data.get("flagged", []):
+        if not isinstance(entry, dict):
+            continue
+        item_id = entry.get("item_id") or entry.get("id")
+        if not item_id:
+            continue
+        flags.append({
+            "id": str(item_id),
+            "title": entry.get("title"),
+            "source_uri": None,
+            "reason": FLAG_REASON,
+            "evidence": (
+                f"{entry.get('description') or ''} "
+                f"(severity={entry.get('severity')}, "
+                f"reporter={entry.get('reporter') or 'unknown'}, "
+                f"issue={entry.get('id')})"
+            ),
+        })
+    return flags
+
+
+def backfill_flag_queue_decisions(path: Path | None, merged: dict, now: datetime) -> int:
+    """Back-fill DECIDED review-queue decisions into the quarantine flag queue.
+
+    For every merged queue entry (id, reason='flagged-issue') whose status is
+    approved/dismissed, the matching quarantine entry's status is set to that
+    decision and the flag queue is written under an exclusive lock
+    (audit.locked_json_update — audit-A finding 5), so a concurrent bridge
+    flag_issue writer can neither tear the file nor lose the back-fill.
+    Returns the number of quarantine entries matched (0 when nothing was
+    decided). The caller must not invoke this in --dry-run.
+    """
+    if path is None or not path.exists():
+        return 0
+    decided = {
+        str(e.get("id")): e.get("status")
+        for e in merged.get("flagged", [])
+        if isinstance(e, dict) and e.get("reason") == FLAG_REASON
+        and e.get("status") in DECIDED_STATUSES
+    }
+    if not decided:
+        return 0
+    matched = 0
+
+    def _apply_decisions(data: dict) -> None:
+        nonlocal matched
+        for entry in data.get("flagged", []):
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("item_id") or entry.get("id"))
+            if key in decided and entry.get("status") != decided[key]:
+                entry["status"] = decided[key]  # idempotent: only count changes
+                matched += 1
+        if matched:
+            data["updated_at"] = now.isoformat()
+
+    try:
+        with _locked_json_update(path, _apply_decisions,
+                                 lambda: {"updated_at": None, "flagged": []}) as data:
+            if data is not None:
+                _apply_decisions(data)  # idempotent — safe if the CM already applied it
+    except RuntimeError as exc:
+        # corrupt/unlockable flag queue: warn and skip (never overwrite blindly)
+        print(f"WARNING: cannot back-fill flag queue {path!r}: {exc}", file=sys.stderr)
+        return 0
+    return matched
 
 
 # ---------------------------------------------------------------------------
@@ -468,11 +695,19 @@ def main(argv: list[str]) -> int:
         return 1
 
     now = datetime.now(timezone.utc)
+
+    # Phase 5: quarantine flag queue (audit.FLAG_QUEUE) — loaded up front so
+    # its entries merge into the review queue as reason "flagged-issue".
+    flag_path = flag_queue_path()
+    flag_data = load_flag_queue(flag_path)
+    fq_flags = flag_queue_flags(flag_data)
+
     try:
         with conn:
             items = fetch_items(conn)
             n_rels = conn.execute("SELECT count(*) AS n FROM relationships").fetchone()["n"]
             flags, contradiction_edges, version_flags = scan(conn, now)
+            flags = flags + fq_flags
 
             # decisions already recorded in the existing queue govern invalidation
             existing_queue = load_queue(queue_path)
@@ -505,13 +740,34 @@ def main(argv: list[str]) -> int:
 
     if args.dry_run:
         write_ok = "not written (dry-run)"
+        n_backfill = 0  # --dry-run writes neither the queue nor the flag queue
     else:
+        # Locked load-merge-write (audit-A finding 5): audit.locked_json_update
+        # holds an exclusive lock across load -> merge -> atomic write, so a
+        # concurrent bridge/curator writer can neither tear the queue file nor
+        # lose updates. merge_queue is idempotent (keyed by (id, reason)), so
+        # applying the mutator twice is harmless.
+        def _merge_mutator(data: dict) -> None:
+            m = merge_queue(data, flags, now)
+            data.clear()
+            data.update(m)
+
         try:
-            write_queue_atomic(queue_path, merged)
+            with _locked_json_update(queue_path, _merge_mutator,
+                                     lambda: {"updated_at": None, "flagged": []}) as data:
+                if data is not None:
+                    _merge_mutator(data)  # safe if the CM already applied it
+            merged = load_queue(queue_path)  # post-write state (merged under the lock)
             write_ok = f"written to {queue_path}"
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             print(f"ERROR: cannot write queue {queue_path!r}: {exc}", file=sys.stderr)
             return 1
+        try:
+            n_backfill = backfill_flag_queue_decisions(flag_path, merged, now)
+        except (OSError, RuntimeError) as exc:
+            print(f"WARNING: cannot back-fill flag queue {flag_path!r}: {exc}",
+                  file=sys.stderr)
+            n_backfill = 0
 
     n_decided = sum(1 for e in merged["flagged"] if e.get("status") in DECIDED_STATUSES)
     n_pending = sum(1 for e in merged["flagged"] if e.get("status") == "pending")
@@ -524,14 +780,17 @@ def main(argv: list[str]) -> int:
           f"contradiction={by_reason.get('contradiction', 0)} "
           f"superseded={by_reason.get('superseded', 0)} "
           f"isolated={by_reason.get('isolated', 0)} "
+          f"flagged_issue={by_reason.get(FLAG_REASON, 0)} "
           f"total_flags={len(flags)}")
     if args.dry_run:
         print(f"summary: would_invalidate={len(invalidations)} "
               f"({'; '.join(f'{l} (vs {w}, {why})' for l, w, why in invalidations) or 'none'})")
-        print("summary: queue NOT written (dry-run)")
+        print("summary: queue NOT written (dry-run); flag queue NOT written (dry-run)")
     else:
         print(f"summary: invalidated={applied} "
               f"({'; '.join(f'{l} (vs {w}, {why})' for l, w, why in invalidations) or 'none'})")
+        print(f"summary: flag_queue_backfilled={n_backfill}"
+              + (f" (flag queue {flag_path})" if flag_path is not None else ""))
     print(f"summary: queue_pending={n_pending} queue_decided={n_decided} "
           f"queue_total={len(merged['flagged'])}")
     return 0

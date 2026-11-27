@@ -32,6 +32,20 @@ All HTTP goes through `requests` with a timeout; 5xx/429 are retried with
 exponential backoff. The endpoint is provider-independent: any
 OpenAI-compatible router (cloud or local, e.g. Ollama-style) works through
 the same EXTRACT_API_URL interface.
+
+Phase 5 external-send gate: before the POST to {EXTRACT_API_URL}/chat/completions,
+audit.check_external_send(api_url) runs (PermissionError -> clean sanitized
+RuntimeError) and an "external_send" event is appended to the audit log via
+audit.log_event. When the repo-root audit module is not importable, the gate
+degrades to the http(s) scheme check in _config() — UNLESS
+SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL is enabled, in which case extraction
+FAILS CLOSED (RuntimeError: audit module unavailable — refusing).
+
+Redirects are followed MANUALLY (allow_redirects=False, max 3 hops): every 3xx
+Location is resolved against the current URL and re-gated
+(audit.check_external_send + an external_send event with the new endpoint
+host) BEFORE the re-POST, so a redirect can never bypass the external-send
+gate. A 3xx without Location or more than 3 hops raises ValueError.
 """
 
 from __future__ import annotations
@@ -146,16 +160,140 @@ def _sanitize(message) -> str:
         s = s.replace(key, "<redacted-api-key>")
     s = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "bearer <redacted>", s)
     s = re.sub(r"(?i)(authorization\s*[:=]\s*)[^\s,;\"']+", r"\1<redacted>", s)
+    # Redact URL query strings / fragments (a signed URL may carry
+    # ?api_key=... secrets): https://host/path?x=y#frag -> https://host/path?<redacted>
+    s = re.sub(r"(?i)(https?://[^?#\s]+)[?#][^\s]*", r"\1?<redacted>", s)
     return s
 
 
 # ---------------------------------------------------------------------------
-# HTTP call with retries
+# External-send approval gate + audit trail (Phase 5, audit.py — worker W1)
 # ---------------------------------------------------------------------------
 
 
+def _load_audit():
+    """Lazily import the repo-root `audit` module. Returns None when it is
+    not importable (extraction then degrades to the scheme check in _config,
+    UNLESS external approval is required — see _approval_required)."""
+    try:
+        import audit
+        return audit
+    except Exception:
+        return None
+
+
+def _approval_required() -> bool:
+    """True when SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL enables the gate —
+    mirrors audit.check_external_send / audit._gate_enabled EXACTLY: unset
+    -> False; any value not in ("", "0", "false", "no", "off") -> True
+    (unrecognized values fail closed, matching audit's exact-match rule)."""
+    v = os.environ.get("SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL")
+    return v is not None and v not in ("", "0", "false", "no", "off")
+
+
+def _fail_closed_when_audit_missing(audit) -> None:
+    """Fail closed (audit-A finding 3): when external approval is required but
+    the audit module is not importable, refuse instead of proceeding silently.
+    When the requirement is unset, a missing audit module stays a no-op."""
+    if audit is None and _approval_required():
+        raise RuntimeError(
+            "external approval required but audit module unavailable — refusing"
+        )
+
+
+def _audit_gate_external_send(api_url: str, *, purpose: str,
+                              model: str | None, payload: dict) -> None:
+    """Gate + audit-log an OUTBOUND send, BEFORE any request is made.
+
+    audit.check_external_send(api_url) raises PermissionError when
+    SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL is enabled and the host is not in
+    SECONDBRAIN_EXTERNAL_ALLOWLIST; the PermissionError is turned into a
+    clean RuntimeError whose message goes through _sanitize (no key
+    material). After the gate passes, one "external_send" event is logged.
+    log_event never raises by contract, and is guarded here anyway.
+
+    Fail closed: when approval is required but the audit module is missing,
+    raises RuntimeError instead of proceeding (audit-A finding 3).
+    """
+    audit = _load_audit()
+    if audit is None:
+        _fail_closed_when_audit_missing(audit)
+        return
+    from urllib.parse import urlsplit
+
+    try:
+        audit.check_external_send(api_url)
+    except PermissionError as exc:
+        raise RuntimeError(
+            _sanitize(
+                f"external send to host {urlsplit(api_url).hostname!r} refused "
+                f"(external approval required): {exc}"
+            )
+        ) from exc
+    body_bytes = json.dumps(payload).encode("utf-8")
+    try:
+        audit.log_event(
+            "external_send",
+            direction="out",
+            endpoint=urlsplit(api_url).hostname,
+            purpose=purpose,
+            model=model,
+            payload_bytes=len(body_bytes),
+        )
+    except Exception:
+        pass  # audit logging must never break extraction
+
+
+def _regate_redirect_hop(new_url: str, *, purpose: str,
+                         model: str | None, payload: dict) -> None:
+    """Re-gate a redirect hop BEFORE re-POSTing (audit-A finding 2).
+
+    Runs audit.check_external_send(new_url) — the PermissionError propagates
+    UNCONVERTED, so a 3xx to a non-allowlisted host is refused before any
+    request is made to it — and logs one "external_send" event with the NEW
+    endpoint host. Fail closed when approval is required but audit is missing.
+    """
+    from urllib.parse import urlsplit
+
+    audit = _load_audit()
+    if audit is None:
+        _fail_closed_when_audit_missing(audit)
+        return
+    audit.check_external_send(new_url)  # PermissionError propagates
+    body_bytes = json.dumps(payload).encode("utf-8")
+    try:
+        audit.log_event(
+            "external_send",
+            direction="out",
+            endpoint=urlsplit(new_url).hostname,
+            purpose=purpose,
+            model=model,
+            payload_bytes=len(body_bytes),
+        )
+    except Exception:
+        pass  # audit logging must never break extraction
+
+
+# ---------------------------------------------------------------------------
+# HTTP call with retries + manual, re-gated redirect following
+# ---------------------------------------------------------------------------
+
+# Redirect handling for the extraction POST (audit-A finding 2): requests'
+# built-in redirect following would chase a 3xx to ANY host without re-running
+# the external-send gate, so redirects are followed MANUALLY
+# (allow_redirects=False): every Location is resolved against the current URL,
+# re-gated via _regate_redirect_hop (check_external_send + an external_send
+# event with the new endpoint host) BEFORE the re-POST, up to _MAX_API_REDIRECTS
+# hops. A 3xx without a Location header, or more than _MAX_API_REDIRECTS hops,
+# raises ValueError.
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+_MAX_API_REDIRECTS = 3
+
+
 def _post_with_retries(url: str, headers: dict, payload: dict,
-                       timeout: float, retries: int, backoff: float) -> str:
+                       timeout: float, retries: int, backoff: float, *,
+                       purpose: str = "llm-extraction",
+                       model: str | None = None) -> str:
     """POST the chat-completion request; return the message content string.
 
     Retries (up to `retries` extra attempts, exponential backoff) on 5xx,
@@ -163,56 +301,93 @@ def _post_with_retries(url: str, headers: dict, payload: dict,
     sent when supported: on a 400 that complains about response_format the
     request is resent once without it (not counted as a retry). Any other
     4xx, or exhausted retries, raise a sanitized RuntimeError.
+
+    Redirects (3xx with a Location header) are followed MANUALLY with
+    allow_redirects=False, re-gated per hop (max _MAX_API_REDIRECTS); a 3xx
+    without Location or too many hops raises ValueError.
     """
+    from urllib.parse import urljoin
+
     use_response_format = True
-    last_error = "unknown error"
-    for attempt in range(max(retries, 0) + 1):
-        body = dict(payload)
-        if not use_response_format:
-            body.pop("response_format", None)
-        try:
-            resp = requests.post(url, headers=headers, json=body, timeout=timeout)
-        except requests.RequestException as exc:
-            last_error = f"request error: {type(exc).__name__}: {exc}"
-            if attempt < retries:
-                time.sleep(backoff * (2 ** attempt))
+    current_url = url
+    hops = 0
+    while True:
+        last_error = "unknown error"
+        resp = None
+        for attempt in range(max(retries, 0) + 1):
+            body = dict(payload)
+            if not use_response_format:
+                body.pop("response_format", None)
+            try:
+                # allow_redirects=False — manual, re-gated redirect loop below
+                resp = requests.post(current_url, headers=headers, json=body,
+                                     timeout=timeout, allow_redirects=False)
+            except requests.RequestException as exc:
+                last_error = f"request error: {type(exc).__name__}: {exc}"
+                resp = None
+                if attempt < retries:
+                    time.sleep(backoff * (2 ** attempt))
+                    continue
+                break
+            if resp.status_code in _REDIRECT_STATUSES:
+                break  # handled after the attempt loop (re-gate, next hop)
+            if resp.status_code == 400 and use_response_format and "response_format" in (resp.text or ""):
+                # Provider does not support response_format — resend without it.
+                use_response_format = False
+                resp = None
                 continue
-            break
-        if resp.status_code == 400 and use_response_format and "response_format" in (resp.text or ""):
-            # Provider does not support response_format — resend without it.
-            use_response_format = False
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last_error = f"HTTP {resp.status_code}: {(resp.text or '')[:300]}"
+                if attempt < retries:
+                    time.sleep(backoff * (2 ** attempt))
+                    continue
+                break
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    _sanitize(f"extraction endpoint returned HTTP {resp.status_code}: "
+                              f"{(resp.text or '')[:300]}")
+                )
+            try:
+                data = resp.json()
+            except ValueError:
+                raise RuntimeError("extraction endpoint returned a non-JSON body") from None
+            try:
+                content = data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                raise RuntimeError(
+                    "extraction endpoint response missing choices[0].message.content"
+                ) from None
+            if isinstance(content, list):  # some providers return a list of parts
+                content = "".join(
+                    part.get("text", "") for part in content if isinstance(part, dict)
+                )
+            if not isinstance(content, str):
+                raise RuntimeError("extraction endpoint returned non-text message content")
+            return content
+        if resp is not None and resp.status_code in _REDIRECT_STATUSES:
+            location = resp.headers.get("Location")
+            if not location:
+                raise ValueError(
+                    _sanitize(f"extraction endpoint returned redirect status "
+                              f"{resp.status_code} without a Location header "
+                              f"(from {_sanitize(current_url)[:200]})")
+                )
+            if hops >= _MAX_API_REDIRECTS:
+                raise ValueError(
+                    _sanitize(f"extraction endpoint redirected more than "
+                              f"{_MAX_API_REDIRECTS} times (last hop from "
+                              f"{_sanitize(current_url)[:200]} to {_sanitize(location)[:200]})")
+                )
+            new_url = urljoin(current_url, location)  # absolute or relative
+            hops += 1
+            # Re-gate + re-log EVERY hop before re-POSTing (audit-A finding 2).
+            # PermissionError propagates — refused before dialing the new host.
+            _regate_redirect_hop(new_url, purpose=purpose, model=model, payload=payload)
+            current_url = new_url
             continue
-        if resp.status_code == 429 or resp.status_code >= 500:
-            last_error = f"HTTP {resp.status_code}: {(resp.text or '')[:300]}"
-            if attempt < retries:
-                time.sleep(backoff * (2 ** attempt))
-                continue
-            break
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                _sanitize(f"extraction endpoint returned HTTP {resp.status_code}: "
-                          f"{(resp.text or '')[:300]}")
-            )
-        try:
-            data = resp.json()
-        except ValueError:
-            raise RuntimeError("extraction endpoint returned a non-JSON body") from None
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            raise RuntimeError(
-                "extraction endpoint response missing choices[0].message.content"
-            ) from None
-        if isinstance(content, list):  # some providers return a list of parts
-            content = "".join(
-                part.get("text", "") for part in content if isinstance(part, dict)
-            )
-        if not isinstance(content, str):
-            raise RuntimeError("extraction endpoint returned non-text message content")
-        return content
-    raise RuntimeError(
-        _sanitize(f"extraction failed after {max(retries, 0) + 1} attempt(s): {last_error}")
-    )
+        raise RuntimeError(
+            _sanitize(f"extraction failed after {max(retries, 0) + 1} attempt(s): {last_error}")
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +511,10 @@ def extract_knowledge(text: str, max_entities: int = 20, max_relations: int = 40
         "response_format": {"type": "json_object"},
         "temperature": 0.0,
     }
-    content = _post_with_retries(url, headers, payload, timeout, retries, backoff)
+    # Phase 5 external-send gate: BEFORE the POST to {EXTRACT_API_URL}/chat/completions.
+    _audit_gate_external_send(api_url, purpose="llm-extraction", model=model, payload=payload)
+    content = _post_with_retries(url, headers, payload, timeout, retries, backoff,
+                                 purpose="llm-extraction", model=model)
     return _parse_extraction(content, max_entities, max_relations)
 
 
