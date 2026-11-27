@@ -64,14 +64,14 @@ def chunk_text(text: str) -> list[str]:
                     continue
                 if estimate_tokens(current + sent) > CHUNK_THRESHOLD and current:
                     chunks.append(current.strip())
-                    current = sent
+                    current = sent + " "
                 else:
                     current += sent + " "
             continue
 
         if estimate_tokens(current + para) > CHUNK_THRESHOLD and current:
             chunks.append(current.strip())
-            current = para
+            current = para + "\n\n"
         else:
             current += para + "\n\n"
 

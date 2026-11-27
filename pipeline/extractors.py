@@ -253,10 +253,18 @@ def extract_url(url: str) -> ExtractionResult:
             body = _read_capped(resp)
         finally:
             resp.close()  # never leak the socket, on success or error
-        # Charset: the Content-Type header first; when the header carries no
-        # charset, sniff it from the (already capped) body via apparent_encoding.
+        # Charset: trust Content-Type charset= when explicitly present; when
+        # omitted, requests defaults text/* to ISO-8859-1, so prefer
+        # apparent_encoding sniffed from the (already capped) body.
         resp._content = body  # the stream was consumed by _read_capped
-        encoding = resp.encoding or resp.apparent_encoding or "utf-8"
+        content_type = resp.headers.get("Content-Type") or ""
+        has_explicit_charset = "charset=" in content_type.lower()
+        apparent = getattr(resp, "apparent_encoding", None)
+        encoding = (
+            resp.encoding
+            if (has_explicit_charset and resp.encoding)
+            else (apparent or resp.encoding or "utf-8")
+        )
         html = body.decode(encoding, errors="replace")
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(["script", "style", "noscript"]):

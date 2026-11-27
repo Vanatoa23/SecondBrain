@@ -184,6 +184,65 @@ async function main() {
   check('summary line shows pending/decided counts',
     /pending 4 · decided 1/.test(summary.textContent), summary.textContent);
 
+  // --- Insert page mode-switching regression test -----------------------------
+  // url/youtube/github share #panel-url and pdf/image/audio share #panel-file;
+  // selecting any of the 7 modes must leave its panel visible and hide the others.
+  const insertEls = new Map();
+  const regInsert = (id, tag = 'div') => {
+    const n = makeNode(tag);
+    n.id = id;
+    insertEls.set(id, n);
+    return n;
+  };
+  const modes = ['text', 'url', 'youtube', 'github', 'pdf', 'image', 'audio'];
+  const modeRadios = modes.map((m) => {
+    const r = makeNode('input');
+    r.value = m;
+    return r;
+  });
+  modeRadios.value = 'text';
+  const formEl = regInsert('ingest-form', 'form');
+  formEl.elements = { mode: modeRadios };
+  for (const id of ['response', 'submit-btn', 'raw-text', 'url-input', 'file-input',
+    'title-input', 'panel-text', 'panel-url', 'panel-file']) {
+    regInsert(id);
+  }
+  insertEls.get('panel-url').hidden = true;
+  insertEls.get('panel-file').hidden = true;
+  const insertBody = makeNode('body');
+  insertBody.dataset = { page: 'insert' };
+  let insertReady = null;
+  const insertDoc = {
+    body: insertBody,
+    createElement: (tag) => makeNode(tag),
+    getElementById: (id) => insertEls.get(id) || null,
+    querySelectorAll: () => [],
+    addEventListener: (type, fn) => { if (type === 'DOMContentLoaded') insertReady = fn; },
+  };
+  runApp(insertDoc, fetchStub);
+  insertReady();
+
+  const expectedPanel = {
+    text: 'panel-text',
+    url: 'panel-url',
+    youtube: 'panel-url',
+    github: 'panel-url',
+    pdf: 'panel-file',
+    image: 'panel-file',
+    audio: 'panel-file',
+  };
+  for (const m of modes) {
+    modeRadios.value = m;
+    const radio = modeRadios.find((r) => r.value === m);
+    for (const fn of radio.listeners.change || []) fn();
+    const want = expectedPanel[m];
+    const ok = ['panel-text', 'panel-url', 'panel-file'].every(
+      (pid) => insertEls.get(pid).hidden === (pid !== want),
+    );
+    check(`insert mode "${m}" shows ${want} and hides other panels`, ok,
+      `text=${insertEls.get('panel-text').hidden} url=${insertEls.get('panel-url').hidden} file=${insertEls.get('panel-file').hidden}`);
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failures.length) console.log(`failures: ${failures.join('; ')}`);
   process.exit(failed === 0 ? 0 : 1);

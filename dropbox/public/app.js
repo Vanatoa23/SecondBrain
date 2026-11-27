@@ -113,7 +113,8 @@ function initInsertPage() {
   for (const input of form.elements.mode) {
     input.addEventListener('change', () => {
       const mode = form.elements.mode.value;
-      for (const [key, panel] of Object.entries(panels)) panel.hidden = key !== mode;
+      const active = panels[mode];
+      for (const panel of new Set(Object.values(panels))) panel.hidden = panel !== active;
       if (FILE_ACCEPT[mode]) fileInput.accept = FILE_ACCEPT[mode];
     });
   }

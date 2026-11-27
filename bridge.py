@@ -255,7 +255,8 @@ def _assert_allowed_path(payload: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _ingest_one(source_type: str, payload, source_uri: str | None = None,
-                title: str | None = None, store_raw: bool = False) -> dict:
+                title: str | None = None, store_raw: bool = False,
+                distillation_override: float | None = None) -> dict:
     """Single-item insert path shared by every source type.
 
     Delegates to pipeline.ingest.ingest — dedup per item, insert-only,
@@ -263,7 +264,8 @@ def _ingest_one(source_type: str, payload, source_uri: str | None = None,
     same insert code as single ingests; no SQL lives in this file.
     """
     from pipeline.ingest import ingest
-    return ingest(source_type, payload, source_uri, title, store_raw=store_raw)
+    return ingest(source_type, payload, source_uri, title, store_raw=store_raw,
+                  distillation_override=distillation_override)
 
 
 def _github_file_title(source_uri: str | None) -> str | None:
@@ -290,7 +292,8 @@ def _cmd_ingest_github(repo_url: str, max_files: int, max_file_bytes: int,
         try:
             res = _ingest_one("text", item.text, source_uri=item.source_uri,
                               title=_github_file_title(item.source_uri),
-                              store_raw=store_raw)
+                              store_raw=store_raw,
+                              distillation_override=0.1)
         except Exception as exc:  # one bad item must not abort the batch
             errors.append(f"{item.source_uri}: {type(exc).__name__}: {exc}")
             continue
@@ -826,16 +829,9 @@ def cmd_review_decision(args: dict) -> dict:
         raise ValueError(
             f"no review queue entry in {queue_path} for id={id_str} reason={reason!r}"
         )
-    now = datetime.now(timezone.utc).isoformat()
-    entry["status"] = decision
-    entry["updated_at"] = now
-    queue["updated_at"] = now
-    tmp_path = queue_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(queue, indent=2, default=str, ensure_ascii=False) + "\n")
-    os.replace(tmp_path, queue_path)
-
     # --- DB (metadata-only jsonb write, parameterized) ---
+    # Commit the DB update BEFORE replacing review_queue.json so a DB error
+    # never leaves the queue file mutated out of sync with the database.
     from pipeline.db import get_connection
 
     with get_connection() as conn:
@@ -855,6 +851,15 @@ def cmd_review_decision(args: dict) -> dict:
                 (item_id,),
             )
         db_updated = cur.rowcount if getattr(cur, "rowcount", None) is not None else 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    entry["status"] = decision
+    entry["updated_at"] = now
+    queue["updated_at"] = now
+    tmp_path = queue_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(queue, indent=2, default=str, ensure_ascii=False) + "\n")
+    os.replace(tmp_path, queue_path)
 
     return {
         "queue_updated": True,
