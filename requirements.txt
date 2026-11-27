@@ -1,0 +1,13 @@
+psycopg[binary]>=3.2
+pgvector>=0.3
+sentence-transformers>=3.0
+pypdf>=5.0
+beautifulsoup4>=4.12
+requests>=2.32
+pytesseract>=0.3
+Pillow>=10.0
+numpy>=1.26
+faster-whisper>=1.1
+av>=14,<17  # faster-whisper 1.2.x passes metadata_errors to av.open; removed in av>=17
+yt-dlp>=2024.1.1
+docling>=2.0
