@@ -159,6 +159,7 @@ def patched_pipeline_for_ingest(fake_conn):
     emb = np.full(1024, 0.001, dtype=np.float32)
     with mock.patch.object(ingest_mod, "get_connection", lambda: fake_get_connection()), \
          mock.patch.object(ingest_mod, "embed_texts", lambda texts: [emb for _ in texts]), \
+         mock.patch.object(ingest_mod, "embed_text", lambda text: emb), \
          mock.patch.object(dedup_mod, "embed_text", lambda text: emb):
         yield
 
@@ -430,7 +431,12 @@ def test_env_gate_on_ingest_stores_extraction():
                str(p[0]).startswith("entity://")]
     assert len(selects) == 2, selects
 
-    rel_inserts = fake_conn.inserts("RELATIONSHIPS")
+    all_rel_inserts = fake_conn.inserts("RELATIONSHIPS")
+    # provenance: one extracted_from edge per entity, from the ingested doc node
+    # (type is a SQL literal in that INSERT, so match on the SQL text)
+    prov = [x for x in all_rel_inserts if "EXTRACTED_FROM" in x[0].upper()]
+    assert len(prov) == 2, prov
+    rel_inserts = [x for x in all_rel_inserts if "EXTRACTED_FROM" not in x[0].upper()]
     assert len(rel_inserts) == 1, rel_inserts
     sql, params = rel_inserts[0]
     assert "ON CONFLICT" in sql.upper()

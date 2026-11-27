@@ -3,7 +3,7 @@
 Covers the _assert_public_url guard inside extract_url: non-http(s) schemes,
 loopback / link-local (cloud metadata) / IPv6-loopback hosts, and the
 dispatch path extract(source_type="url", ...). The public-URL happy path is
-tested by monkeypatching requests.get and socket.getaddrinfo so no real
+tested by monkeypatching requests.Session.get and socket.getaddrinfo so no real
 network call or DNS lookup happens.
 """
 
@@ -116,13 +116,13 @@ def test_public_url_fetches_with_mocked_network():
         body=b"<html><body><p>Hello article</p></body></html>"
     )
     with mock.patch("socket.getaddrinfo", side_effect=_fake_dns), \
-         mock.patch("requests.get", return_value=fake) as fake_get:
+         mock.patch("requests.Session.get", return_value=fake) as fake_get:
         result = extract_url("https://example.com/article")
     assert isinstance(result, ExtractionResult), type(result)
     assert "Hello article" in result.text, result.text
     assert result.mime_type == "text/html"
     assert result.source_uri == "https://example.com/article"
-    # the guard passed, so requests.get was called exactly once, no auto
+    # the guard passed, so the session fetch was called exactly once, no auto
     # redirects, streamed, with timeout=30
     assert fake_get.call_count == 1
     assert fake_get.call_args.kwargs.get("timeout") == 30
@@ -142,7 +142,7 @@ def test_redirect_to_cloud_metadata_refused():
         status_code=302, headers={"Location": "http://169.254.169.254/latest/meta-data"}
     )
     with mock.patch("socket.getaddrinfo", side_effect=_fake_dns), \
-         mock.patch("requests.get", return_value=redirect) as fake_get:
+         mock.patch("requests.Session.get", return_value=redirect) as fake_get:
         try:
             extract_url("https://example.com/start")
         except ValueError:
@@ -168,7 +168,7 @@ def test_redirect_to_public_url_followed_and_revalidated():
         return _fake_dns(host, *args, **kwargs)
 
     with mock.patch("socket.getaddrinfo", side_effect=recording_dns), \
-         mock.patch("requests.get", side_effect=[redirect, final]) as fake_get:
+         mock.patch("requests.Session.get", side_effect=[redirect, final]) as fake_get:
         result = extract_url("https://example.com/start")
     assert "Final destination text" in result.text, result.text
     assert result.source_uri == "https://example.com/start"
@@ -188,7 +188,7 @@ def test_too_many_redirects_refused():
         for i in range(10)
     ]
     with mock.patch("socket.getaddrinfo", side_effect=_fake_dns), \
-         mock.patch("requests.get", side_effect=responses) as fake_get:
+         mock.patch("requests.Session.get", side_effect=responses) as fake_get:
         try:
             extract_url("https://example.com/start")
         except ValueError as exc:
@@ -203,7 +203,7 @@ def test_oversize_body_refused():
     """A streamed body larger than the 10 MB cap aborts with ValueError."""
     big = _FakeStreamResponse(body=b"x" * (10 * 1024 * 1024 + 1))
     with mock.patch("socket.getaddrinfo", side_effect=_fake_dns), \
-         mock.patch("requests.get", return_value=big):
+         mock.patch("requests.Session.get", return_value=big):
         try:
             extract_url("https://example.com/big")
         except ValueError as exc:
@@ -216,7 +216,7 @@ def test_redirect_without_location_refused():
     """A 302 with no Location header is a clean ValueError, not a crash."""
     redirect = _FakeStreamResponse(status_code=302, headers={})
     with mock.patch("socket.getaddrinfo", side_effect=_fake_dns), \
-         mock.patch("requests.get", return_value=redirect):
+         mock.patch("requests.Session.get", return_value=redirect):
         try:
             extract_url("https://example.com/start")
         except ValueError:

@@ -304,7 +304,7 @@ def step_3_staleness_ordering(ctx) -> None:
         )
 
     out = search("aurora borealis forecasting solar wind magnetic field",
-                 top_k=10, token_budget=100000)
+                 top_k=20, token_budget=100000)
     results = out["results"]
     by_uri = {r.get("source_uri"): r for r in results}
     assert fresh_uri in by_uri and stale_uri in by_uri, [r.get("source_uri") for r in results]

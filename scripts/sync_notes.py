@@ -8,7 +8,8 @@ Usage (from the repo root):
 NOTES_DIR resolution order: --dir flag > $NOTES_DIR > <repo>/notes
 
 Behaviour:
-  * Scans *.md recursively under NOTES_DIR.
+  * Scans *.md recursively under NOTES_DIR (skipping VCS/hidden dirs:
+    .obsidian, .trash, .git).
   * For each file, sha = pipeline.dedup.content_hash(text) (sha256 of the
     normalized file text). If a knowledge_items row already exists with
     source_uri = <abs file path> AND metadata->>'document_hash' = sha, the
@@ -53,14 +54,28 @@ from pipeline.ingest import ingest  # noqa: E402
 
 WATCH_INTERVAL_S = 60
 
+# VCS/hidden directories that are never walked when scanning the vault.
+_SKIP_DIR_PARTS = {".obsidian", ".trash", ".git"}
+
 
 def resolve_notes_dir(cli_dir: str | None) -> Path:
     """--dir > $NOTES_DIR > <repo>/notes"""
     return Path(cli_dir or os.environ.get("NOTES_DIR") or (REPO_ROOT / "notes"))
 
 
+
 def find_md_files(notes_dir: Path) -> list[Path]:
-    return sorted(p for p in notes_dir.rglob("*.md") if p.is_file())
+    """All *.md files under notes_dir, skipping VCS/hidden dirs (any path
+    part in _SKIP_DIR_PARTS — .obsidian/.trash/.git)."""
+    out: list[Path] = []
+    for p in sorted(notes_dir.rglob("*.md")):
+        if not p.is_file():
+            continue
+        rel_parts = p.relative_to(notes_dir).parts
+        if any(part in _SKIP_DIR_PARTS for part in rel_parts):
+            continue
+        out.append(p)
+    return out
 
 
 def _is_synced(conn, abs_path: str, sha: str) -> bool:

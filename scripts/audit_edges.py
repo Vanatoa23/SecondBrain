@@ -15,10 +15,14 @@ credential can end up in a process list / shell history):
     TEST_DATABASE_URL first (tests point it at a throwaway test DB),
     then DATABASE_URL (real ops use — same convention as scripts/backup.sh).
 
-Sampling is deterministic: seeded RNG picks an OFFSET into the id-ordered
-relationships table; the query is `ORDER BY id LIMIT <n> OFFSET %s` — every
-value is parameterized except LIMIT, which is a literal int AFTER validation.
-Same seed + same table contents => identical sample.
+Sampling is deterministic and uniform over the whole table (not a contiguous
+window): the query is
+
+    ORDER BY md5(id::text || ':' || %s) LIMIT <n>
+
+with the seed as a parameter — every value is parameterized except LIMIT,
+which is a literal int AFTER validation. Same seed + same table contents =>
+identical sample; different seeds spread over the whole id space.
 
 Output JSON: {"sampled_at", "n", "seed", "db", "edges": [...]} where each edge
 is {"relationship": <full row>, "from_item": {...}, "to_item": {...}} and each
@@ -41,7 +45,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
 import re
 import sys
 from datetime import datetime, timezone
@@ -108,7 +111,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--out", type=str, default=None,
                    help="output JSON path (default edges_audit_<UTC ts>.json)")
     p.add_argument("--seed", type=str, default=str(DEFAULT_SEED),
-                   help=f"RNG seed for the sample offset (int, default {DEFAULT_SEED})")
+                   help=f"seed for the uniform md5() sample order (int, default {DEFAULT_SEED})")
     args = p.parse_args(argv)
 
     def _int(name: str, raw: str) -> int:
@@ -143,24 +146,20 @@ def _context_bucket(context) -> str:
     return "other"
 
 
-def sample_edges(conn, n: int, seed: int) -> tuple[list[dict], int, int]:
-    """Deterministically sample up to n relationship rows (ORDER BY id, seeded
-    offset). Returns (rows, total, offset). LIMIT is a validated literal int;
-    the offset is a parameter."""
+def sample_edges(conn, n: int, seed: int) -> tuple[list[dict], int]:
+    """Deterministically sample up to n relationship rows: uniform seeded
+    sample over the whole table via `ORDER BY md5(id::text || ':' || %s)`.
+
+    Returns (rows, total). The seed is a parameter; LIMIT is a validated
+    literal int. Same seed + same table => identical sample."""
     total = conn.execute("SELECT count(*) AS total FROM relationships").fetchone()["total"]
-    rng = random.Random(seed)
-    offset = rng.randrange(total) if total > 0 else 0
-    if total > n:
-        offset = min(offset, total - n)  # keep the sampled window full
-    else:
-        offset = 0
-    # n is a validated int (1..MAX_N) -> safe as a literal; everything else is %s.
+    # n is a validated int (1..MAX_N) -> safe as a literal; the seed is %s.
     rows = conn.execute(
         f"SELECT id, from_id, to_id, type, strength, direction, context, created_at "
-        f"FROM relationships ORDER BY id LIMIT {int(n)} OFFSET %s",
-        (offset,),
+        f"FROM relationships ORDER BY md5(id::text || ':' || %s) LIMIT {int(n)}",
+        (str(seed),),
     ).fetchall()
-    return [dict(r) for r in rows], int(total), offset
+    return [dict(r) for r in rows], int(total)
 
 
 def fetch_endpoints(conn, item_ids: list) -> dict:
@@ -184,7 +183,7 @@ def fetch_endpoints(conn, item_ids: list) -> dict:
 
 
 def build_audit(conn, n: int, seed: int, db_desc: str) -> dict:
-    rel_rows, total, offset = sample_edges(conn, n, seed)
+    rel_rows, total = sample_edges(conn, n, seed)
     endpoints = fetch_endpoints(conn, [r["from_id"] for r in rel_rows] +
                                 [r["to_id"] for r in rel_rows])
     edges = []
@@ -203,7 +202,6 @@ def build_audit(conn, n: int, seed: int, db_desc: str) -> dict:
         "db": db_desc,
         "edges": edges,
         "_total": total,
-        "_offset": offset,
     }
 
 
@@ -265,7 +263,6 @@ def main(argv: list[str]) -> int:
 
     summary = summarize(audit)
     total = audit.pop("_total")
-    offset = audit.pop("_offset")
 
     payload = json.dumps(audit, indent=2, default=str, ensure_ascii=False)
     try:
@@ -276,7 +273,7 @@ def main(argv: list[str]) -> int:
 
     print(f"audit: db      = {db_desc} (host/dbname only — credentials redacted)")
     print(f"audit: sampled = {summary['total']} edge(s) "
-          f"(requested n={args.n}, seed={args.seed}, offset={offset}, total={total})")
+          f"(requested n={args.n}, seed={args.seed}, total={total})")
     print(f"audit: output  = {out_path}")
     print("audit: note    = audit JSON outputs are review artifacts and are "
           "intentionally NOT added to .gitignore")
