@@ -12,9 +12,11 @@
  *   GET  /api/review-queue  -> {ok:true, queue:{...}} or {ok:true, queue:null}
  *                            (reads review_queue.json from the repo root)
  *   POST /api/review-decision {id, reason, decision:"approved"|"dismissed"}
- *                            -> sets status on the matching flagged entry
- *                            (keyed by id+reason), atomic tmp+rename write,
- *                            returns the updated queue
+ *                            -> local 400 validation, then delegates to the
+ *                            bridge `review_decision` command (locked
+ *                            interface; atomically updates review_queue.json
+ *                            AND DB metadata.review_status) and returns the
+ *                            bridge envelope verbatim (500 on bridge failure)
  *
  * Bridge contract (locked by PM — bridge.py is implemented by another worker):
  *   `python -m bridge <command> '<json-args>'` run with cwd = repo root prints
@@ -32,7 +34,9 @@
  * Security: binds 127.0.0.1 only (HOST env to override, but a non-loopback
  * HOST prints a loud warning and requires ALLOW_NONLOCAL_HOST=1, else exit 1),
  * rejects non-local
- * Host headers (DNS-rebinding guard), requires same-origin Origin (or
+ * Host headers (DNS-rebinding guard; bracketed IPv6 literals like "[::1]:3000"
+ * parse to hostname "::1"), sets X-Frame-Options: DENY and a same-origin CSP
+ * (clickjacking guard), requires same-origin Origin (or
  * Sec-Fetch-Site same-origin/none) on mutating /api routes (CSRF guard;
  * header-less local tooling like curl is still allowed), makes no outbound
  * network calls, writes
@@ -82,8 +86,12 @@ const PYTHON = process.env.PYTHON || 'python';
 const BRIDGE_TIMEOUT_MS = Number.parseInt(process.env.BRIDGE_TIMEOUT_MS || '180000', 10);
 
 const SEARCH_METHODS = ['vector', 'fts', 'graph'];
-const INGEST_SOURCE_TYPES = ['text', 'url', 'pdf'];
-const ALLOWED_UPLOAD_EXT = new Set(['.txt', '.md', '.text', '.pdf']);
+const INGEST_SOURCE_TYPES = ['text', 'url', 'pdf', 'image', 'youtube', 'audio', 'github'];
+const ALLOWED_UPLOAD_EXT = new Set([
+  '.txt', '.md', '.text', '.pdf',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp',
+  '.wav', '.mp3', '.m4a', '.ogg', '.flac',
+]);
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const REVIEW_DECISIONS = new Set(['approved', 'dismissed']);
 
@@ -98,10 +106,22 @@ app.disable('x-powered-by');
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cache-Control', 'no-store');
+  // Clickjacking guard: never frame this UI; only same-origin subresources.
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none'");
   const hostHeader = String(req.headers.host || '').toLowerCase();
   if (hostHeader) {
-    const hostname = hostHeader.replace(/^\[|\]$/g, '').split(':')[0];
-    const allowed = new Set(['127.0.0.1', 'localhost', '::1', HOST.toLowerCase()]);
+    // Host may carry a port, and IPv6 literals are bracketed ("[::1]:3000"):
+    // strip the brackets FIRST, then drop the port only for v4/hostname forms
+    // (splitting "[::1]:3000" on ':' before unbracketing yields "").
+    let hostname = hostHeader;
+    if (hostname.startsWith('[')) {
+      const close = hostname.indexOf(']');
+      hostname = close >= 0 ? hostname.slice(1, close) : hostname.slice(1);
+    } else {
+      hostname = hostname.split(':')[0];
+    }
+    const allowed = new Set(['127.0.0.1', 'localhost', '::1', HOST_NORMALIZED]);
     if (!allowed.has(hostHeader) && !allowed.has(hostname)) {
       return res.status(403).json({ ok: false, error: 'forbidden: this server is local-only' });
     }
@@ -176,6 +196,9 @@ class BridgeClient {
     const c = this.child;
     this.child = null;
     if (c) {
+      // Fail pending requests BEFORE removeAllListeners so they resolve with
+      // an error envelope immediately instead of hanging until their timers.
+      this.failAll('bridge child killed');
       c.removeAllListeners();
       try { c.kill('SIGKILL'); } catch { /* already gone */ }
     }
@@ -370,11 +393,13 @@ app.post('/api/upload', express.raw({ type: '*/*', limit: MAX_UPLOAD_BYTES }), (
 });
 
 // ---------------------------------------------------------------------------
-// Review queue (curator output) — read + human decision.
-// The queue file is review_queue.json at the repo root, written by
+// Review queue (curator output) — read-only here; human decisions go through
+// the bridge. The queue file is review_queue.json at the repo root, written by
 // scripts/curator.py: {"updated_at": <iso>, "flagged": [{id, title,
-// source_uri, reason, evidence, status}, ...]}. This server never creates it;
-// it only reads it and records human decisions (status) on flagged entries.
+// source_uri, reason, evidence, status}, ...]}. This server never creates or
+// writes it — GET reads it, and POST /api/review-decision delegates to the
+// bridge `review_decision` command (which updates the file AND the DB
+// metadata.review_status atomically).
 // ---------------------------------------------------------------------------
 function readQueueFile() {
   // Returns {queue} on success, {missing:true} when the file does not exist,
@@ -398,12 +423,6 @@ function readQueueFile() {
   return { queue };
 }
 
-function writeQueueFileAtomic(queue) {
-  const tmp = QUEUE_PATH + '.tmp'; // same tmp name scripts/curator.py uses
-  fs.writeFileSync(tmp, JSON.stringify(queue, null, 2) + '\n');
-  fs.renameSync(tmp, QUEUE_PATH); // atomic on POSIX and Windows (same volume)
-}
-
 // GET /api/review-queue — {ok:true, queue:{...}} when the file exists,
 // {ok:true, queue:null} when it does not (curator has not run yet).
 app.get('/api/review-queue', (req, res) => {
@@ -413,10 +432,14 @@ app.get('/api/review-queue', (req, res) => {
   return res.status(200).json({ ok: true, queue: r.queue });
 });
 
-// POST /api/review-decision — {id, reason, decision} records a human decision
-// on the flagged entry keyed by (id, reason). 400 on bad input, missing queue,
-// corrupt queue, or no matching entry. Mutating -> CSRF middleware applies.
-app.post('/api/review-decision', (req, res) => {
+// POST /api/review-decision — {id, reason, decision}. Local 400 validation
+// first, then delegation to the locked bridge interface `review_decision`
+// (implemented in bridge.py): it atomically updates review_queue.json AND the
+// DB metadata.review_status and returns {"ok":true,"result":{...}}. This
+// server never writes the queue file directly anymore — the bridge envelope
+// is returned verbatim (HTTP 200 ok:true / HTTP 500 ok:false).
+// Mutating -> CSRF middleware applies.
+app.post('/api/review-decision', async (req, res) => {
   const body = req.body || {};
   const { id, reason, decision } = body;
   const errors = [];
@@ -433,34 +456,8 @@ app.post('/api/review-decision', (req, res) => {
     return res.status(400).json({ ok: false, error: errors.join('; ') });
   }
 
-  const r = readQueueFile();
-  if (r.missing) {
-    return res.status(400).json({
-      ok: false,
-      error: 'no review queue yet — run python scripts/curator.py first (review_queue.json is missing)',
-    });
-  }
-  if (r.error) return res.status(400).json({ ok: false, error: r.error });
-
-  const queue = r.queue;
-  const entry = queue.flagged.find(
-    (e) => e && typeof e === 'object' && String(e.id) === id && String(e.reason) === reason,
-  );
-  if (!entry) {
-    return res.status(400).json({
-      ok: false,
-      error: `no flagged entry matching id=${JSON.stringify(id)} reason=${JSON.stringify(reason)}`,
-    });
-  }
-
-  entry.status = decision;
-  queue.updated_at = new Date().toISOString();
-  try {
-    writeQueueFileAtomic(queue);
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: `failed to write review_queue.json: ${err.message}` });
-  }
-  return res.status(200).json({ ok: true, queue });
+  const envelope = await runBridge('review_decision', { id, reason, decision });
+  return res.status(envelope.ok ? 200 : 500).json(envelope);
 });
 
 // ---------------------------------------------------------------------------

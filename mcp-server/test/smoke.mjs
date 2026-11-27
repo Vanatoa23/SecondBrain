@@ -15,6 +15,11 @@
  *   - an erroring call (search with empty query, delete_item with a random
  *     uuid) returns isError:true without killing the server (a follow-up
  *     list_recent still succeeds)
+ *   - fast-failure cases (no DB needed): with PYTHON=/nonexistent the server
+ *     still answers initialize immediately (transport connects before the
+ *     background warm-up) and tool calls fail fast as isError; a child that
+ *     dies mid-request has its pending JSON-RPC requests REJECTED on
+ *     exit/close instead of hanging until the ~240 s request timeout
  *
  * Guard pattern (locked — same invariant as tests/test_e2e.py): the DB is
  * selected from TEST_DATABASE_URL ONLY (never DATABASE_URL). The dbname must
@@ -168,8 +173,26 @@ child.stderr.on("data", (d) => {
   if (s.trim()) console.error(`[server stderr] ${s.trim()}`);
 });
 
+// A crashed/exited server child must REJECT all pending JSON-RPC requests
+// immediately — otherwise a dead child hangs the smoke for the full
+// REQUEST_TIMEOUT_MS (~240 s) per pending request.
+function rejectAllPending(reason) {
+  if (pending.size === 0) return;
+  console.error(`[smoke] ${reason} — rejecting ${pending.size} pending request(s)`);
+  for (const [, p] of pending) {
+    clearTimeout(p.timer);
+    p.reject(new Error(reason));
+  }
+  pending.clear();
+}
+
 child.on("exit", (code) => {
   console.error(`[smoke] server process exited with code ${code}`);
+  rejectAllPending(`server process exited (code ${code})`);
+});
+
+child.on("close", (code, signal) => {
+  rejectAllPending(`server process closed (code ${code}, signal ${signal})`);
 });
 
 function send(obj) {
@@ -209,6 +232,124 @@ function parseText(r) {
 }
 
 async function main() {
+  // --- fast-failure cases (no DB needed) --------------------------------------
+  // (a) PYTHON=/nonexistent: the server must still answer initialize quickly
+  //     (the transport connects before the background bridge warm-up) and a
+  //     tool call must come back fast as isError — never a 240 s hang.
+  {
+    const badEnv = { ...childEnv, PYTHON: "/nonexistent/python-w4-smoke" };
+    const bad = spawn(process.execPath, [serverEntry], {
+      cwd: serverDir, shell: false, env: badEnv, stdio: ["pipe", "pipe", "pipe"],
+    });
+    bad.stdin.on("error", () => { /* child died mid-write — the exit handler rejects pending */ });
+    let badBuf = "";
+    const badPending = new Map();
+    let badNextId = 1;
+    bad.stdout.on("data", (chunk) => {
+      badBuf += chunk.toString("utf8");
+      let idx;
+      while ((idx = badBuf.indexOf("\n")) >= 0) {
+        const line = badBuf.slice(0, idx).trim();
+        badBuf = badBuf.slice(idx + 1);
+        if (!line) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg && msg.id !== undefined && badPending.has(msg.id)) {
+          const { resolve, timer } = badPending.get(msg.id);
+          clearTimeout(timer);
+          badPending.delete(msg.id);
+          resolve(msg);
+        }
+      }
+    });
+    bad.on("exit", (code) => {
+      for (const [, p] of badPending) { clearTimeout(p.timer); p.reject(new Error(`server exited (code ${code})`)); }
+      badPending.clear();
+    });
+    bad.on("close", (code, signal) => {
+      for (const [, p] of badPending) { clearTimeout(p.timer); p.reject(new Error(`server closed (code ${code}, signal ${signal})`)); }
+      badPending.clear();
+    });
+    const badRequest = (method, params) => {
+      const id = badNextId++;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          badPending.delete(id);
+          reject(new Error(`timeout waiting for response to ${method}`));
+        }, REQUEST_TIMEOUT_MS);
+        badPending.set(id, { resolve, timer });
+        bad.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      });
+    };
+    try {
+      const t0 = Date.now();
+      const init = await badRequest("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "smoke-bad-python", version: "0.1.0" },
+      });
+      const initMs = Date.now() - t0;
+      assert(init.result && init.result.protocolVersion,
+        "PYTHON=/nonexistent: initialize still answered (transport connects before warm-up)");
+      assert(initMs < 30_000,
+        `PYTHON=/nonexistent: initialize answered fast (${initMs} ms < 30000 ms — not blocked on model loading)`);
+      bad.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+      const t1 = Date.now();
+      const res = await badRequest("tools/call", { name: "search", arguments: { query: "fast failure probe" } });
+      const callMs = Date.now() - t1;
+      assert(res.result && res.result.isError === true,
+        "PYTHON=/nonexistent: tools/call returns isError (bridge unspawnable) instead of hanging");
+      assert(callMs < 60_000,
+        `PYTHON=/nonexistent: tool call failed fast (${callMs} ms < 60000 ms — not the 240 s timeout)`);
+    } finally {
+      try {
+        bad.kill();
+        if (isWin && bad.pid) {
+          try { execSync(`taskkill /pid ${bad.pid} /T /F`, { stdio: "ignore" }); } catch { /* already gone */ }
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  // (b) a child that dies mid-request: the pending JSON-RPC request must be
+  //     REJECTED immediately on exit/close — not resolved by the 240 s timer.
+  {
+    const dying = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(7), 150)"], {
+      cwd: serverDir, shell: false, stdio: ["pipe", "pipe", "pipe"],
+    });
+    dying.stdin.on("error", () => { /* already dead — the exit handler rejects pending */ });
+    const dPending = new Map();
+    const dRequest = (method) => new Promise((resolve, reject) => {
+      const id = 1;
+      const timer = setTimeout(() => {
+        dPending.delete(id);
+        reject(new Error(`timeout waiting for response to ${method}`));
+      }, REQUEST_TIMEOUT_MS);
+      dPending.set(id, { resolve, reject, timer });
+      dying.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params: {} }) + "\n");
+    });
+    const onDead = (why) => {
+      for (const [, p] of dPending) { clearTimeout(p.timer); p.reject(new Error(why)); }
+      dPending.clear();
+    };
+    dying.on("exit", (code) => onDead(`server process exited (code ${code})`));
+    dying.on("close", (code, signal) => onDead(`server process closed (code ${code}, signal ${signal})`));
+    const t0 = Date.now();
+    let rejected = null;
+    try {
+      await dRequest("initialize");
+    } catch (e) {
+      rejected = e;
+    }
+    const ms = Date.now() - t0;
+    assert(rejected !== null, "crashed child: pending request REJECTED (not left hanging)");
+    assert(/exited|closed/.test(String(rejected && rejected.message)),
+      `crashed child: rejection names the exit (${rejected && rejected.message})`);
+    assert(ms < 30_000,
+      `crashed child: rejection is fast (${ms} ms < 30000 ms — not the 240 s timeout)`);
+    assert(dPending.size === 0, "crashed child: pending map drained on exit/close");
+  }
+
   if (dbUrl && !(await isDbReachable(dbUrl))) {
     console.log(SKIP_MSG);
     console.log(`(connect to ${dbUrl.split("@").slice(-1)[0]} failed)`);
