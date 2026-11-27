@@ -102,6 +102,8 @@ Based on the research, we're building a **PostgreSQL-centric hybrid system** wit
 - [ ] Zero critical data leaves without approval event
 - [ ] **Acceptance**: Two different agents retrieve and flag without conflicts
 
+**Progress 2026-11-27 (Phase 5 implemented, OPEN PR — not merged yet):** read/write MCP scopes (`SECONDBRAIN_MCP_SCOPE`, write scope gated by `SECONDBRAIN_WRITE_TOKEN`), `flag_issue` into the `flagged_issues.json` quarantine queue (never the KB; curator merges it into the review queue as `flagged-issue` with decision back-fill), `project_context`/`discover_relevant` per-project context packages, append-only `audit_log.jsonl` with fingerprints-only, external-send approval gate (`SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL` + allowlist, dual-parser hardened, redirects re-gated, fail-closed) on all EXTRACT/VISION POSTs. Double independent audit clean after fix batch (backslash-userinfo bypass, raw-URL logging, redirect bypass, dream read-scope bypass, queue-write races all fixed). `tests/test_phase5_acceptance.py` ALL PASS (two MCP runtimes retrieve + flag without conflicts, quarantine idempotent, audit events, gate). See PM_LEDGER [2026-11-27] Phase 5 entries + the PR.
+
 ### Phase 6: Proactive Intelligence (Ongoing)
 **Goal**: System that surfaces insights
 
