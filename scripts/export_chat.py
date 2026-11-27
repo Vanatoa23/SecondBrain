@@ -9,12 +9,20 @@ Detected export shapes (generic, not vendor-locked):
 
   * a JSON list of conversations:  [{"title": ..., "messages": [...]}, ...]
   * an object wrapping them:       {"conversations": [{"title": ..., "messages": [...]}, ...]}
+  * a ChatGPT conversations.json export: a list (or {"conversations": [...]})
+    where each conversation has a "mapping" {node_id: {"message": {"author":
+    {"role": ...}, "content": {"parts": [...]}}, "children": [...]}} — the
+    messages are walked from the root node(s) (no parent) following
+    "children" in order; title = conv.get("title")
+  * a Claude export: a list of conversations with "chat_messages":
+    [{"sender": "human"|"assistant", "text": ...}] — sender human->user,
+    assistant->assistant; title = conv.get("name") or the uuid
 
-Each conversation must be an object with a "messages" list; the title comes
-from "title" (fallbacks: "name", then "conversation-<i>"). Each message is an
-object with a "role" and either "content" or "text"; the content may be a
-plain string OR a list of parts like [{"type": "text", "text": "..."}, ...]
-(non-text parts are skipped, text parts are concatenated).
+For the legacy "messages" shape each message is an object with a "role" and
+either "content" or "text"; the content may be a plain string OR a list of
+parts like [{"type": "text", "text": "..."}, ...] (non-text parts are
+skipped, text parts are concatenated). The ChatGPT/Claude adapters normalize
+into the same {"role", "content"} messages.
 
 Every conversation becomes ONE knowledge item:
 
@@ -120,6 +128,81 @@ def _conversation_text(title: str, messages: list) -> str:
     return "\n".join(lines)
 
 
+def _chatgpt_messages(conv: dict) -> list[dict]:
+    """ChatGPT conversations.json adapter: walk the "mapping" tree from the
+    root node(s) (no parent) following "children" in order and emit the
+    non-empty user/assistant messages as {"role", "content"} dicts."""
+    mapping = conv.get("mapping")
+    if not isinstance(mapping, dict) or not mapping:
+        raise ValueError('ChatGPT conversation has no non-empty "mapping" object')
+    children_of = {}
+    roots = []
+    for node_id, node in mapping.items():
+        if not isinstance(node, dict):
+            continue
+        children_of[node_id] = node.get("children") or []
+        if not node.get("parent"):
+            roots.append(node_id)
+    messages: list[dict] = []
+    seen_nodes: set = set()
+
+    def walk(node_id):
+        if node_id in seen_nodes:
+            return
+        seen_nodes.add(node_id)
+        node = mapping.get(node_id)
+        if not isinstance(node, dict):
+            return
+        msg = node.get("message")
+        if isinstance(msg, dict):
+            author = msg.get("author") or {}
+            role = author.get("role") if isinstance(author, dict) else None
+            content = msg.get("content") or {}
+            parts = content.get("parts") if isinstance(content, dict) else None
+            if role in ("user", "assistant") and isinstance(parts, list):
+                text_parts = [
+                    p if isinstance(p, str) else (p.get("text") or "")
+                    for p in parts
+                    if isinstance(p, str) or isinstance(p, dict)
+                ]
+                text = "".join(text_parts).strip()
+                if text:
+                    messages.append({"role": role, "content": text})
+        for child in children_of.get(node_id, []):
+            walk(child)
+
+    for root in sorted(roots):
+        walk(root)
+    return messages
+
+
+def _claude_messages(conv: dict) -> list[dict]:
+    """Claude export adapter: "chat_messages" [{"sender": "human"|"assistant",
+    "text": ...}] -> [{"role": "user"|"assistant", "content": ...}]."""
+    raw = conv.get("chat_messages")
+    if not isinstance(raw, list):
+        raise ValueError('Claude conversation has no "chat_messages" list')
+    messages: list[dict] = []
+    for m in raw:
+        if not isinstance(m, dict):
+            continue
+        sender = str(m.get("sender") or "").lower()
+        text = m.get("text")
+        if text is None:
+            text = m.get("content")
+        if isinstance(text, list):  # tolerate part-lists like the legacy shape
+            text = _message_content({"content": text})
+        if sender == "human":
+            role = "user"
+        elif sender == "assistant":
+            role = "assistant"
+        else:
+            continue
+        if isinstance(text, str) and text.strip():
+            messages.append({"role": role, "content": text})
+    return messages
+
+
 def parse_export(path: str | Path) -> list[dict]:
     """Parse an AI-chat export file into a list of conversation dicts.
 
@@ -129,7 +212,8 @@ def parse_export(path: str | Path) -> list[dict]:
 
     Raises ValueError with a clear message for unreadable files, malformed
     JSON, or a top-level shape that is neither a list of conversations nor an
-    object with a "conversations" list.
+    object with a "conversations" list (per-conversation shapes: legacy
+    "messages", ChatGPT "mapping", Claude "chat_messages").
     """
     path = Path(path)
     try:
@@ -155,10 +239,25 @@ def parse_export(path: str | Path) -> list[dict]:
     for i, conv in enumerate(conversations):
         if not isinstance(conv, dict):
             raise ValueError(f"conversation #{i} in {path} is not a JSON object")
+
         messages = conv.get("messages")
-        if not isinstance(messages, list):
-            raise ValueError(f'conversation #{i} in {path} has no "messages" list')
-        title = conv.get("title") or conv.get("name") or f"conversation-{i}"
+        if isinstance(messages, list):
+            # legacy flat shape: {"messages": [{"role", "content"|"text"}, ...]}
+            title = conv.get("title") or conv.get("name") or f"conversation-{i}"
+        elif isinstance(conv.get("mapping"), dict):
+            # ChatGPT conversations.json: {"title"?, "mapping": {node_id: ...}}
+            messages = _chatgpt_messages(conv)
+            title = conv.get("title") or f"conversation-{i}"
+        elif isinstance(conv.get("chat_messages"), list):
+            # Claude export: {"name"?, "uuid"?, "chat_messages": [...]}
+            messages = _claude_messages(conv)
+            title = conv.get("name") or conv.get("uuid") or f"conversation-{i}"
+        else:
+            raise ValueError(
+                f'conversation #{i} in {path} has an unsupported shape: expected '
+                '"messages" (list), "mapping" (ChatGPT), or "chat_messages" (Claude)'
+            )
+
         title = str(title)
         out.append({
             "index": i,
@@ -184,13 +283,16 @@ class BridgeServe:
     The torch/model load is paid once per serve process, not once per
     conversation. A daemon reader thread feeds a queue so each request can
     time out. If the child dies it is respawned once and the request retried
-    once (mirrors the MCP server's respawn-once behavior).
+    once (mirrors the MCP server's respawn-once behavior); reader lines are
+    tagged with a generation counter so the stale reader queue of the dead
+    child (including its EOF sentinel) can never feed the new process.
     """
 
     def __init__(self, database_url: str):
         self._database_url = database_url
         self._next_id = 1
         self._lines: queue.Queue = queue.Queue()
+        self._gen = 0  # generation counter — stale readers of a dead child are ignored
         self.proc: subprocess.Popen | None = None
         self._spawn()
 
@@ -207,17 +309,19 @@ class BridgeServe:
             text=True,
             bufsize=1,
         )
-        reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._gen += 1
+        gen = self._gen
+        reader = threading.Thread(target=self._read_loop, args=(gen,), daemon=True)
         reader.start()
 
-    def _read_loop(self) -> None:
+    def _read_loop(self, gen: int) -> None:
         try:
             for line in self.proc.stdout:
-                self._lines.put(line)
+                self._lines.put((gen, line))
         except Exception:
             pass
         finally:
-            self._lines.put(None)  # EOF sentinel: the serve child is gone
+            self._lines.put((gen, None))  # EOF sentinel: this serve child is gone
 
     def request(self, command: str, args: dict, timeout: float = INGEST_TIMEOUT_S) -> dict:
         """Send one request and return the id-matched response envelope.
@@ -249,9 +353,14 @@ class BridgeServe:
                 item = self._lines.get(timeout=remaining)
             except queue.Empty:
                 raise TimeoutError(f"no response to {command!r} within {timeout}s") from None
-            if item is None:
+            gen, raw = item
+            if gen != self._gen:
+                # Stale line/sentinel from the PREVIOUS (dead) child — never
+                # let the old reader queue feed the new process.
+                continue
+            if raw is None:
                 raise EOFError("bridge serve process exited")
-            item = item.strip()
+            item = raw.strip()
             if not item:
                 continue
             try:

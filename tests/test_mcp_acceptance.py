@@ -435,6 +435,12 @@ def run_mcp_phase(url: str, notes: list[dict]) -> list[str]:
         check(names == sorted(EXPECTED_TOOLS) and len(tools) == 8,
               f"tools/list has exactly the 8 locked tools (got {len(tools)}: {names})")
 
+        # --- warmup call (untimed): the server now connects before model load
+        # (audit fix: never block initialize on warmup), so the FIRST tool call
+        # pays the one-time bge-m3/reranker load in the background; the measured
+        # queries below must be warm.
+        call_tool(client, "search", {"query": "warmup ping", "top_k": 1})
+
         # --- 5 fixed timed search queries --------------------------------------
         latencies: list[float] = []
         for k, idx in enumerate(QUERY_TARGETS, 1):

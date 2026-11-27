@@ -51,7 +51,7 @@ def _sanitize(message) -> str:
     return s
 
 
-def _assert_public_url(url: str) -> None:
+def _assert_public_url(url: str) -> list[str]:
     """SSRF guard: refuse to fetch anything that is not a public http(s) URL.
 
     Only the http/https schemes are allowed, and the hostname must resolve
@@ -60,6 +60,11 @@ def _assert_public_url(url: str) -> None:
     169.254.0.0/16 cloud metadata, CGNAT shared space 100.64.0.0/10, and
     more), or is loopback/private/link-local/reserved/multicast/unspecified,
     the URL is rejected before any request is made.
+
+    Returns the validated IP addresses (as strings) the hostname resolved
+    to — callers PIN the actual fetch to these, so the hostname is resolved
+    exactly once and a DNS-rebind between check and connect cannot redirect
+    the request (see _PinnedHTTPAdapter / _fetch_pinned below).
     """
     import ipaddress
     import socket
@@ -87,6 +92,7 @@ def _assert_public_url(url: str) -> None:
         ipaddress.ip_network("192.0.0.9/32"),
         ipaddress.ip_network("192.0.0.10/32"),
     )
+    validated: list[str] = []
     for _family, _socktype, _proto, _canonname, sockaddr in infos:
         ip = ipaddress.ip_address(sockaddr[0])
         if (
@@ -100,6 +106,8 @@ def _assert_public_url(url: str) -> None:
             or any(ip in net for net in non_public_nets)
         ):
             raise ValueError("refusing to fetch non-public URL")
+        validated.append(str(ip))
+    return validated
 
 
 def extract_text(raw: str, source_uri: str | None = None) -> ExtractionResult:
@@ -135,46 +143,129 @@ def _read_capped(resp, max_bytes: int = _MAX_URL_BYTES) -> bytes:
     return b"".join(chunks)
 
 
+def _pinned_adapter(pinned_ip: str, orig_host: str):
+    """Build a requests HTTPAdapter whose connection pool dials the
+    PRE-VALIDATED `pinned_ip` instead of re-resolving the hostname at connect
+    time.
+
+    This closes the DNS-rebind TOCTOU: the hostname is resolved exactly once
+    (by _assert_public_url, which also validates every returned IP), and the
+    HTTP request is pinned to that result — a second, attacker-controlled
+    DNS answer can never redirect the fetch. The original hostname is still
+    used where it matters:
+
+      * Host header — set explicitly on the request in send();
+      * TLS SNI + certificate hostname — via the connection's
+        server_hostname (conn_kw on https pools).
+    """
+    import requests
+    from urllib.parse import urlsplit
+
+    class _PinnedAdapter(requests.adapters.HTTPAdapter):
+        def send(self, request, **kwargs):
+            parts = urlsplit(request.url)
+            default_port = 443 if parts.scheme.lower() == "https" else 80
+            host = orig_host
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"  # re-bracket IPv6 literals for the header
+            request.headers["Host"] = (
+                host if parts.port in (None, default_port) else f"{host}:{parts.port}"
+            )
+            return super().send(request, **kwargs)
+
+        def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
+            pool = super().get_connection_with_tls_context(
+                request, verify, proxies=proxies, cert=cert
+            )
+            # Pin the pool's dial target to the validated IP (pool.host
+            # drives the TCP connect; the Host header is explicit and TLS
+            # SNI is fixed via server_hostname, so nothing else changes).
+            pool.host = pinned_ip
+            if getattr(pool, "scheme", "") == "https":
+                pool.conn_kw.setdefault("server_hostname", orig_host)
+            return pool
+
+    return _PinnedAdapter()
+
+
+def _fetch_pinned(url: str, ips: list[str], timeout: float = 30):
+    """GET `url` through a session whose adapter is pinned to ips[0] — the
+    hostname is never resolved again (no proxy either: the dial must be the
+    pinned IP). Returns the streamed, non-redirect-following response."""
+    import requests
+    from urllib.parse import urlsplit
+
+    if not ips:
+        raise ValueError(f"no validated IP to pin the fetch of {url!r} to")
+    hostname = urlsplit(url).hostname or ""
+    adapter = _pinned_adapter(ips[0], hostname)
+    session = requests.Session()
+    session.trust_env = False  # no env proxies — the dial must be the pinned IP
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    try:
+        return session.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "SecondBrain/1.0"},
+            allow_redirects=False,  # manual redirect loop — re-pin every hop
+            stream=True,            # body read in capped chunks below
+        )
+    finally:
+        session.close()
+
+
 def extract_url(url: str) -> ExtractionResult:
     """Fetch a URL and extract readable text from the HTML.
 
     The fetched page is untrusted data (see module docstring). SSRF guard:
-    _assert_public_url runs before EVERY request, including each manually
-    followed redirect (max _MAX_URL_REDIRECTS hops; each Location, absolute
-    or relative, is re-validated before it is fetched). The response is
-    streamed with a hard 10 MB body cap.
+    _assert_public_url runs before EVERY request and RETURNS the validated
+    IPs; the fetch itself goes through _fetch_pinned, whose adapter dials
+    exactly that IP (Host header and TLS SNI stay on the original hostname),
+    so the hostname is resolved once per request and a DNS rebind between
+    validation and connect cannot redirect it. Redirects are followed
+    MANUALLY (allow_redirects=False, max _MAX_URL_REDIRECTS hops; each
+    Location, absolute or relative, is re-validated and re-pinned before it
+    is fetched). The response is streamed with a hard 10 MB body cap and
+    always closed (finally).
     """
-    import requests
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin
 
     current = url
     for hop in range(_MAX_URL_REDIRECTS + 1):
-        _assert_public_url(current)
-        resp = requests.get(
-            current,
-            timeout=30,
-            headers={"User-Agent": "SecondBrain/1.0"},
-            allow_redirects=False,  # manual redirect loop — re-validate every hop
-            stream=True,            # body read in capped chunks below
+        ips = _assert_public_url(current)  # one resolution, returns validated IPs
+        resp = _fetch_pinned(current, ips, timeout=30)
+        try:
+            if resp.status_code in _REDIRECT_STATUSES:
+                location = resp.headers.get("Location")
+                if not location:
+                    raise ValueError(
+                        f"redirect status {resp.status_code} without a Location header from {current!r}"
+                    )
+                if hop >= _MAX_URL_REDIRECTS:
+                    raise ValueError(
+                        f"too many redirects (>{_MAX_URL_REDIRECTS}) while fetching {url!r}"
+                    )
+                current = urljoin(current, location)  # resolves relative Locations too
+                continue
+            resp.raise_for_status()
+            body = _read_capped(resp)
+        finally:
+            resp.close()  # never leak the socket, on success or error
+        # Charset: trust Content-Type charset= when explicitly present; when
+        # omitted, requests defaults text/* to ISO-8859-1, so prefer
+        # apparent_encoding sniffed from the (already capped) body.
+        resp._content = body  # the stream was consumed by _read_capped
+        content_type = resp.headers.get("Content-Type") or ""
+        has_explicit_charset = "charset=" in content_type.lower()
+        apparent = getattr(resp, "apparent_encoding", None)
+        encoding = (
+            resp.encoding
+            if (has_explicit_charset and resp.encoding)
+            else (apparent or resp.encoding or "utf-8")
         )
-        if resp.status_code in _REDIRECT_STATUSES:
-            location = resp.headers.get("Location")
-            resp.close()
-            if not location:
-                raise ValueError(
-                    f"redirect status {resp.status_code} without a Location header from {current!r}"
-                )
-            if hop >= _MAX_URL_REDIRECTS:
-                raise ValueError(
-                    f"too many redirects (>{_MAX_URL_REDIRECTS}) while fetching {url!r}"
-                )
-            current = urljoin(current, location)  # resolves relative Locations too
-            continue
-        resp.raise_for_status()
-        body = _read_capped(resp)
-        resp.close()
-        html = body.decode(resp.encoding or "utf-8", errors="replace")
+        html = body.decode(encoding, errors="replace")
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
@@ -502,7 +593,9 @@ def _yt_dlp_runner(url: str, workdir: str) -> dict:
         "skip_download": True,  # metadata + subtitles only, never the media file
         "writesubtitles": True,
         "writeautomaticsub": True,
-        "subtitleslangs": ["en", "en-US", "en-GB", "en-CA", "en-AU"],
+        # Try English first ('en', then any 'en.*' variant), then any
+        # available caption language.
+        "subtitleslangs": ["en", "en.*", "all"],
         "subtitlesformat": "vtt/srt/json3/best",
         "outtmpl": outtmpl,
         "quiet": True,
@@ -529,12 +622,16 @@ def _yt_dlp_runner(url: str, workdir: str) -> dict:
 
 
 def extract_youtube(url: str, runner=None) -> ExtractionResult:
-    """Extract caption transcript (preferred) or metadata (fallback) from a YouTube URL.
+    """Extract a YouTube video's caption transcript + metadata.
 
     runner: injectable for tests — callable(url, workdir) ->
         {"subtitle_path": str | None, "info": dict}. Defaults to the real
-        yt-dlp call (_yt_dlp_runner). If no captions are available, the text is
-        the video title + description + URL — a transcript is NEVER fabricated.
+        yt-dlp call (_yt_dlp_runner). Caption languages are tried in the
+        order 'en', 'en.*', then any available.
+
+    The text ALWAYS includes the video title and description (even when
+    captions exist), plus the caption transcript when available — a
+    transcript is NEVER fabricated.
     """
     import os
     import tempfile
@@ -547,21 +644,19 @@ def extract_youtube(url: str, runner=None) -> ExtractionResult:
         outcome = runner(url, workdir) or {}
         subtitle_path = outcome.get("subtitle_path")
         info = outcome.get("info") or {}
-        text = ""
+        captions = ""
         if subtitle_path:
             try:
                 with open(subtitle_path, encoding="utf-8", errors="replace") as fh:
-                    text = _subtitle_to_text(fh.read())
+                    captions = _subtitle_to_text(fh.read())
             except OSError:
-                text = ""
+                captions = ""
 
-    if text.strip():
-        return ExtractionResult(text=text, mime_type=YOUTUBE_MIME_TYPE, source_uri=url)
-
-    # Fallback: metadata only (title + description + URL). Never fabricate a transcript.
+    # Always include the metadata (title + description + URL); append the
+    # caption transcript when one was found. Never fabricate a transcript.
     title = str(info.get("title") or "").strip()
     description = str(info.get("description") or "").strip()
-    parts = [p for p in (title, url, description) if p]
+    parts = [p for p in (title, captions.strip(), description, url) if p]
     return ExtractionResult(text="\n\n".join(parts), mime_type=YOUTUBE_MIME_TYPE, source_uri=url)
 
 

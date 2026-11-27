@@ -17,8 +17,9 @@ Commands (json-args in parentheses):
 
     ingest        {"source_type": "text"|"url"|"pdf"|"image"|"youtube"|"audio"|"github", "payload": str,
                    ("youtube": payload is the video URL; captions preferred, metadata fallback),
-                   ("audio": payload is a path to an audio file; the file is read into
-                    bytes before ingest — a missing file fails here with a clean error),
+                   ("pdf"|"image"|"audio": payload is a path to a file; the file is
+                    read into bytes before ingest — a missing file fails here with
+                    a clean error, and store_raw then stores the real file bytes),
                    ("github": payload is a repo URL https://github.com/<owner>/<repo>(/tree/<branch>);
                     the repo's text files are imported as MULTIPLE knowledge items, each
                     inserted through the same per-item path as single ingests),
@@ -53,6 +54,19 @@ Commands (json-args in parentheses):
                   the report stands alone with queue_written=false, queue_path=null.
                   result: {report: {total_items, staleness_checked, stale, not_stale,
                   contradictions, isolated, queue_written, queue_path, dry_run}, ...}
+    review_decision {"id": str, "reason": str, "decision": "approved"|"dismissed"}
+                  Record a human review decision atomically in BOTH places:
+                  the repo-root review_queue.json entry keyed by (id, reason)
+                  gets status=decision and updated_at=now (written to a tmp file
+                  then os.replace — ValueError on a missing queue file, no
+                  matching entry, or bad input), AND the DB is updated —
+                  "dismissed": UPDATE knowledge_items SET metadata =
+                  metadata - 'review_status' WHERE id=%s;
+                  "approved": only when metadata->>'review_status' LIKE
+                  'invalidated%' -> metadata || {"review_status":
+                  "invalidated-approved"} (otherwise a no-op).
+                  result: {queue_updated, db_updated, id, reason, decision,
+                  queue_path}
 
 Serve mode (persistent process — heavy imports/models paid once, not per call):
 
@@ -86,11 +100,11 @@ import os
 import sys
 import traceback
 import uuid
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 
 USAGE = ("usage: python -m bridge <command> '<json-args>' | python -m bridge serve\n"
-         "  commands: ingest, search, get_related, link_items, update_item, delete_item, list_recent, curator\n"
+         "  commands: ingest, search, get_related, link_items, update_item, delete_item, list_recent, curator, review_decision\n"
          "  serve: persistent JSON-lines mode, one request per stdin line, one response line each")
 
 VALID_SOURCE_TYPES = ("text", "url", "pdf", "image", "youtube", "audio", "github")
@@ -167,23 +181,54 @@ def _req_uuid(args: dict, name: str) -> uuid.UUID:
         raise ValueError(f"arg {name!r} is not a valid uuid: {v!r}") from None
 
 
+def _sanitize_error(text) -> str:
+    """Strip secrets from an error string before it lands in an envelope.
+
+    Replaces the value of every environment variable whose NAME contains
+    KEY/TOKEN/PASSWORD/SECRET with <redacted> (so a leaked API key, DB
+    password, etc. can never appear in an error message), and redacts URL
+    credentials (scheme://user:pass@ -> scheme://user:<redacted>@).
+    """
+    import re
+
+    s = str(text)
+    for name, val in os.environ.items():
+        if val and any(tag in name.upper() for tag in ("KEY", "TOKEN", "PASSWORD", "SECRET")):
+            s = s.replace(val, "<redacted>")
+    s = re.sub(
+        r"(?i)(\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:)[^@\s/]+(@)",
+        r"\1<redacted>\2",
+        s,
+    )
+    return s
+
+
 # ---------------------------------------------------------------------------
 # Server-side path confinement (path-traversal guard)
 # ---------------------------------------------------------------------------
 # For source_type pdf/image/audio the payload is a SERVER-SIDE PATH (the
 # dropbox UI uploads into dropbox/inbox/ first and passes that path). Confine
-# it: realpath(payload) must live under dropbox/inbox/ OR the system temp dir
-# (tests/scripts stage files there); extra roots via BRIDGE_PATH_ALLOWLIST
-# (os.pathsep-separated). Anything else is refused before any file access.
+# it: realpath(payload) must live under dropbox/inbox/ OR the staging dir
+# <system temp dir>/secondbrain-staging (tests/scripts stage files there);
+# extra roots via BRIDGE_PATH_ALLOWLIST (os.pathsep-separated). Anything else
+# is refused before any file access.
+
+
+def _staging_root() -> str:
+    """Dedicated staging dir under the system temp dir (created on demand)."""
+    import tempfile
+
+    staging = os.path.join(tempfile.gettempdir(), "secondbrain-staging")
+    os.makedirs(staging, exist_ok=True)
+    return staging
+
 
 
 def _allowed_path_roots() -> list[str]:
-    import tempfile
-
     repo_root = os.path.dirname(os.path.abspath(__file__))
     roots = [
         os.path.realpath(os.path.join(repo_root, "dropbox", "inbox")),
-        os.path.realpath(tempfile.gettempdir()),
+        os.path.realpath(_staging_root()),
     ]
     extra = os.environ.get("BRIDGE_PATH_ALLOWLIST", "")
     for part in extra.split(os.pathsep):
@@ -200,7 +245,8 @@ def _assert_allowed_path(payload: str) -> None:
             return
     raise ValueError(
         f"path outside allowed roots: {payload!r} (allowed: dropbox/inbox/, "
-        f"the system temp dir, plus BRIDGE_PATH_ALLOWLIST entries)"
+        f"the secondbrain-staging dir under the system temp dir, plus "
+        f"BRIDGE_PATH_ALLOWLIST entries)"
     )
 
 
@@ -209,7 +255,8 @@ def _assert_allowed_path(payload: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _ingest_one(source_type: str, payload, source_uri: str | None = None,
-                title: str | None = None, store_raw: bool = False) -> dict:
+                title: str | None = None, store_raw: bool = False,
+                distillation_override: float | None = None) -> dict:
     """Single-item insert path shared by every source type.
 
     Delegates to pipeline.ingest.ingest — dedup per item, insert-only,
@@ -217,7 +264,8 @@ def _ingest_one(source_type: str, payload, source_uri: str | None = None,
     same insert code as single ingests; no SQL lives in this file.
     """
     from pipeline.ingest import ingest
-    return ingest(source_type, payload, source_uri, title, store_raw=store_raw)
+    return ingest(source_type, payload, source_uri, title, store_raw=store_raw,
+                  distillation_override=distillation_override)
 
 
 def _github_file_title(source_uri: str | None) -> str | None:
@@ -244,7 +292,8 @@ def _cmd_ingest_github(repo_url: str, max_files: int, max_file_bytes: int,
         try:
             res = _ingest_one("text", item.text, source_uri=item.source_uri,
                               title=_github_file_title(item.source_uri),
-                              store_raw=store_raw)
+                              store_raw=store_raw,
+                              distillation_override=0.1)
         except Exception as exc:  # one bad item must not abort the batch
             errors.append(f"{item.source_uri}: {type(exc).__name__}: {exc}")
             continue
@@ -291,21 +340,17 @@ def cmd_ingest(args: dict) -> dict:
         return _cmd_ingest_github(payload, max_files, max_file_bytes, store_raw=store_raw)
     if source_type in ("pdf", "image", "audio"):
         # payload is a server-side path for these types — confine it to the
-        # allowed roots BEFORE any file access or DB work.
+        # allowed roots BEFORE any file access or DB work, then read the file
+        # BYTES so a missing/unreadable file fails here (clean error, before
+        # any DB access) and store_raw stores the real bytes, not the path.
         _assert_allowed_path(payload)
-    if source_type == "audio":
-        # payload is a filesystem path to an audio file. Read the bytes now so
-        # a missing/unreadable file fails here — before any DB access — with a
-        # clean error that lands in the bridge error envelope.
-        import os
-
         if not os.path.isfile(payload):
-            raise ValueError(f"audio payload is not an existing file: {payload!r}")
+            raise ValueError(f"{source_type} payload is not an existing file: {payload!r}")
         with open(payload, "rb") as fh:
-            audio_bytes = fh.read()
+            file_bytes = fh.read()
         if source_uri is None:
             source_uri = payload
-        payload = audio_bytes
+        payload = file_bytes
     return _ingest_one(source_type, payload, source_uri, title, store_raw=store_raw)
 
 
@@ -553,6 +598,22 @@ def _curator_script_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "curator.py")
 
 
+
+def _resolve_db_url() -> str:
+    """Connection URL for the curator report SQL: TEST_DATABASE_URL first
+    (tests point it at a throwaway test DB), then DATABASE_URL — the same
+    convention as scripts/curator.py resolve_url()."""
+    url = (os.environ.get("TEST_DATABASE_URL") or "").strip()
+    if not url:
+        url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not url:
+        raise RuntimeError(
+            "no database URL — set TEST_DATABASE_URL (tests) or DATABASE_URL "
+            "(ops), e.g. postgresql://postgres@127.0.0.1:5433/secondbrain"
+        )
+    return url
+
+
 def _import_curator_module(path: str):
     """Lazily import scripts/curator.py by file location via importlib."""
     import importlib.util
@@ -601,14 +662,22 @@ def cmd_curator(args: dict) -> dict:
     args: {"dry_run"?: bool = false} — a dry run runs the full scan but writes
     neither the review queue nor any invalidation UPDATE.
     """
-    from pipeline.db import get_connection
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from pipeline.db import _register_vector_loader
     from retrieval.merge import is_stale
 
     dry_run = args.get("dry_run", False)
     if not isinstance(dry_run, bool):
         raise ValueError("arg 'dry_run' must be a boolean")
 
-    with get_connection() as conn:
+    # Resolve the URL TEST_DATABASE_URL-first (same convention as
+    # scripts/curator.py resolve_url()) and connect explicitly with it —
+    # get_connection() would only see DATABASE_URL.
+    conn = psycopg.connect(_resolve_db_url(), row_factory=dict_row)
+    _register_vector_loader(conn)
+    try:
         total_items = int(conn.execute(
             "SELECT COUNT(*) AS n FROM knowledge_items"
         ).fetchone()["n"])
@@ -630,6 +699,12 @@ def cmd_curator(args: dict) -> dict:
               AND NOT EXISTS (SELECT 1 FROM relationships r WHERE r.to_id = ki.id)
             """
         ).fetchone()["n"])
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
     report = {
         "total_items": total_items,
@@ -682,9 +757,118 @@ def cmd_curator(args: dict) -> dict:
                 result["curator_result"] = _jsonable(out)
         except Exception as e:
             # The optional curator script must never break the report itself.
-            result["curator_error"] = f"{type(e).__name__}: {e}"
+            result["curator_error"] = _sanitize_error(f"{type(e).__name__}: {e}")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# review_decision — record a human review decision (queue + DB)
+# ---------------------------------------------------------------------------
+
+_REVIEW_QUEUE_NAME = "review_queue.json"
+_REVIEW_DECISIONS = ("approved", "dismissed")
+
+
+def _review_queue_path() -> str:
+    """Repo-root review_queue.json (repo root = this file's directory)."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), _REVIEW_QUEUE_NAME)
+
+
+def cmd_review_decision(args: dict) -> dict:
+    """Record a review decision atomically in the queue file AND the DB.
+
+    args: {"id": str (uuid), "reason": str, "decision": "approved"|"dismissed"}
+
+    Queue: the repo-root review_queue.json entry keyed by (id, reason) gets
+    status=decision and updated_at=now; the file is written to a tmp file and
+    os.replace'd into place. ValueError on a missing/unreadable queue, no
+    matching entry, or bad input.
+
+    DB (the only sanctioned non-insert write besides the curator merge — all
+    parameterized):
+      "dismissed" -> UPDATE knowledge_items SET metadata = metadata -
+                     'review_status' WHERE id = %s
+      "approved"  -> only when (metadata->>'review_status') LIKE 'invalidated%':
+                     SET metadata = metadata ||
+                     '{"review_status": "invalidated-approved"}'::jsonb
+                     (otherwise a no-op).
+
+    Returns {"queue_updated": bool, "db_updated": int, "id", "reason",
+    "decision", "queue_path"}.
+    """
+    item_id = _req_uuid(args, "id")
+    reason = _req_str(args, "reason")
+    decision = _req_str(args, "decision")
+    if decision not in _REVIEW_DECISIONS:
+        raise ValueError(f"arg 'decision' must be one of {_REVIEW_DECISIONS}, got {decision!r}")
+    id_str = str(item_id)
+
+    # --- queue file (atomic tmp + os.replace) ---
+    queue_path = _review_queue_path()
+    if not os.path.isfile(queue_path):
+        raise ValueError(f"review queue not found: {queue_path}")
+    try:
+        with open(queue_path, encoding="utf-8") as fh:
+            queue = json.load(fh)
+    except (json.JSONDecodeError, OSError) as e:
+        raise ValueError(f"review queue {queue_path} is not readable JSON: {e}") from None
+    if not isinstance(queue, dict) or not isinstance(queue.get("flagged"), list):
+        raise ValueError(
+            f"review queue {queue_path} has an unexpected shape "
+            '(expected {"updated_at": ..., "flagged": [...]})'
+        )
+    entry = None
+    for e in queue["flagged"]:
+        if (isinstance(e, dict)
+                and str(e.get("id")) == id_str
+                and str(e.get("reason")) == reason):
+            entry = e
+            break
+    if entry is None:
+        raise ValueError(
+            f"no review queue entry in {queue_path} for id={id_str} reason={reason!r}"
+        )
+    # --- DB (metadata-only jsonb write, parameterized) ---
+    # Commit the DB update BEFORE replacing review_queue.json so a DB error
+    # never leaves the queue file mutated out of sync with the database.
+    from pipeline.db import get_connection
+
+    with get_connection() as conn:
+        if decision == "dismissed":
+            cur = conn.execute(
+                "UPDATE knowledge_items SET metadata = metadata - 'review_status' WHERE id = %s",
+                (item_id,),
+            )
+        else:  # approved — only an existing invalidated* marker is rewritten
+            # (%% is psycopg placeholder escaping for the literal % in LIKE)
+            cur = conn.execute(
+                """
+                UPDATE knowledge_items
+                SET metadata = metadata || '{"review_status": "invalidated-approved"}'::jsonb
+                WHERE id = %s AND (metadata->>'review_status') LIKE 'invalidated%%'
+                """,
+                (item_id,),
+            )
+        db_updated = cur.rowcount if getattr(cur, "rowcount", None) is not None else 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    entry["status"] = decision
+    entry["updated_at"] = now
+    queue["updated_at"] = now
+    tmp_path = queue_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(queue, indent=2, default=str, ensure_ascii=False) + "\n")
+    os.replace(tmp_path, queue_path)
+
+    return {
+        "queue_updated": True,
+        "db_updated": int(db_updated),
+        "id": id_str,
+        "reason": reason,
+        "decision": decision,
+        "queue_path": queue_path,
+    }
 
 
 COMMANDS = {
@@ -696,6 +880,7 @@ COMMANDS = {
     "delete_item": cmd_delete_item,
     "list_recent": cmd_list_recent,
     "curator": cmd_curator,
+    "review_decision": cmd_review_decision,
 }
 
 
@@ -767,19 +952,20 @@ def _serve_handle_line(line: str) -> dict:
             raise ValueError("request line must be a JSON object")
     except (json.JSONDecodeError, ValueError) as e:
         return {"id": None, "ok": False,
-                "error": f"malformed request line: {e}"}
+                "error": _sanitize_error(f"malformed request line: {e}")}
     rid = req.get("id")
     command = req.get("command")
     args = req.get("args", {})
     if not isinstance(command, str) or not command or not isinstance(args, dict):
         return {"id": None, "ok": False,
-                "error": "request must look like "
-                         '{"id": <any>, "command": <string>, "args": {<object>}}'}
+                "error": _sanitize_error(
+                    "request must look like "
+                    '{"id": <any>, "command": <string>, "args": {<object>}}')}
     handler = COMMANDS.get(command)
     if handler is None:
         return {"id": rid, "ok": False,
-                "error": f"unknown command {command!r}; "
-                         f"choose from {sorted(COMMANDS)}"}
+                "error": _sanitize_error(
+                    f"unknown command {command!r}; choose from {sorted(COMMANDS)}")}
     try:
         result = handler(args)
         return {"id": rid, "ok": True, "result": _jsonable(result)}
@@ -787,7 +973,7 @@ def _serve_handle_line(line: str) -> dict:
         print(f"[bridge serve] command {command!r} failed:\n"
               f"{traceback.format_exc()}", file=sys.stderr)
         return {"id": rid, "ok": False,
-                "error": f"{type(e).__name__}: {e}"}
+                "error": _sanitize_error(f"{type(e).__name__}: {e}")}
 
 
 def serve() -> int:
@@ -823,7 +1009,8 @@ def serve() -> int:
             except OSError as e:
                 # Unreadable line: emit {"id": null, ok: false} and keep serving.
                 payload = {"id": None, "ok": False,
-                           "error": f"unreadable request line: {type(e).__name__}: {e}"}
+                           "error": _sanitize_error(
+                               f"unreadable request line: {type(e).__name__}: {e}")}
             else:
                 if raw == b"" or raw == "":  # EOF
                     break
@@ -832,7 +1019,8 @@ def serve() -> int:
                         line = raw.decode("utf-8")
                     except UnicodeDecodeError as e:
                         payload = {"id": None, "ok": False,
-                                   "error": f"unreadable request line: {type(e).__name__}: {e}"}
+                                   "error": _sanitize_error(
+                                       f"unreadable request line: {type(e).__name__}: {e}")}
                         line = None
                     else:
                         payload = _serve_handle_line(line)
@@ -880,12 +1068,13 @@ def main(argv: list[str]) -> int:
         if not isinstance(args, dict):
             raise ValueError("json-args must be a JSON object")
     except (json.JSONDecodeError, ValueError) as e:
-        return _emit({"ok": False, "error": f"invalid json-args: {e}"}, False)
+        return _emit({"ok": False, "error": _sanitize_error(f"invalid json-args: {e}")}, False)
 
     handler = COMMANDS.get(command)
     if handler is None:
         return _emit(
-            {"ok": False, "error": f"unknown command {command!r}; choose from {sorted(COMMANDS)}"},
+            {"ok": False, "error": _sanitize_error(
+                f"unknown command {command!r}; choose from {sorted(COMMANDS)}")},
             False,
         )
 
@@ -899,7 +1088,7 @@ def main(argv: list[str]) -> int:
         payload, ok = {"ok": True, "result": _jsonable(result)}, True
     except Exception as e:
         print(f"[bridge] command {command!r} failed:\n{traceback.format_exc()}", file=sys.stderr)
-        payload = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        payload = {"ok": False, "error": _sanitize_error(f"{type(e).__name__}: {e}")}
         ok = False
     finally:
         try:

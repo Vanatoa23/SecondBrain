@@ -9,15 +9,19 @@
 <body data-page="insert">
   <header>
     <h1>Second Brain — Dropbox</h1>
-    <nav><a href="/">Insert</a> <span aria-hidden="true">·</span> <a href="/retrieve">Retrieve</a></nav>
+    <nav><a href="/">Insert</a> <span aria-hidden="true">·</span> <a href="/retrieve">Retrieve</a> <span aria-hidden="true">·</span> <a href="/review">Review</a></nav>
   </header>
   <main>
     <form id="ingest-form">
       <fieldset>
         <legend>Source</legend>
-        <label><input type="radio" name="mode" value="text" checked> Raw text</label>
+        <label><input type="radio" name="mode" value="text" checked> Text</label>
         <label><input type="radio" name="mode" value="url"> URL</label>
-        <label><input type="radio" name="mode" value="file"> File (.txt / .md / .pdf — saved to dropbox/inbox/ first)</label>
+        <label><input type="radio" name="mode" value="youtube"> YouTube</label>
+        <label><input type="radio" name="mode" value="github"> GitHub</label>
+        <label><input type="radio" name="mode" value="pdf"> PDF (file — saved to dropbox/inbox/ first)</label>
+        <label><input type="radio" name="mode" value="image"> Image (file — saved to dropbox/inbox/ first)</label>
+        <label><input type="radio" name="mode" value="audio"> Audio (file — saved to dropbox/inbox/ first)</label>
       </fieldset>
 
       <div class="mode-panel" id="panel-text">
@@ -32,7 +36,7 @@
 
       <div class="mode-panel" id="panel-file" hidden>
         <label for="file-input">File</label>
-        <input id="file-input" type="file" accept=".txt,.md,.text,.pdf">
+        <input id="file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.bmp,.wav,.mp3,.m4a,.ogg,.flac">
       </div>
 
       <label for="title-input">Title (optional)</label>

@@ -115,6 +115,7 @@ def graph_expand(conn, seed_ids: list[str], hops: int = 1, top_k: int = 20) -> l
 
     found: dict[str, dict] = {}
     frontier = set(seed_ids)
+    expanded = set(seed_ids)  # visited: every node is expanded at most once
 
     for hop in range(1, hops + 1):
         if not frontier:
@@ -144,7 +145,7 @@ def graph_expand(conn, seed_ids: list[str], hops: int = 1, top_k: int = 20) -> l
             nid = r["id"]
             if nid in seed_ids:
                 continue
-            score = decay * (r["strength"] or 0.5)
+            score = decay * (r["strength"] if r["strength"] is not None else DEFAULT_STRENGTH)
             if nid not in found or found[nid]["score"] < score:
                 found[nid] = {
                     "id": nid,
@@ -166,7 +167,13 @@ def graph_expand(conn, seed_ids: list[str], hops: int = 1, top_k: int = 20) -> l
                     },
                 }
             next_frontier.add(nid)
-        frontier = next_frontier - set(seed_ids)
+        # Visited set: expand each node at most once (seeds included), so
+        # cycles terminate. Multi-hop still works because next_frontier holds
+        # the newly discovered, not-yet-expanded nodes (found may contain
+        # them already — subtracting `found` here would empty the frontier
+        # after hop 1 and silently degrade to 1-hop expansion).
+        frontier = next_frontier - expanded
+        expanded |= next_frontier
 
     return sorted(found.values(), key=lambda x: x["score"], reverse=True)[:top_k]
 

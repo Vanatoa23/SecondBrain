@@ -48,8 +48,10 @@ def chunk_text(text: str) -> list[str]:
     current = ""
 
     for para in _split_paragraphs(text):
-        # If a single paragraph alone exceeds the hard cap, split it by sentences.
-        if estimate_tokens(para) > HARD_CAP:
+        # A paragraph larger than CHUNK_THRESHOLD is split at sentence
+        # boundaries — not only when it exceeds HARD_CAP (a 2000-8192-token
+        # single-paragraph transcript must not stay one giant chunk).
+        if estimate_tokens(para) > CHUNK_THRESHOLD:
             for sent in _split_sentences(para):
                 if estimate_tokens(sent) > HARD_CAP:
                     # Oversized single sentence (no usable punctuation):
@@ -60,16 +62,16 @@ def chunk_text(text: str) -> list[str]:
                         current = ""
                     chunks.extend(_hard_split(sent))
                     continue
-                if estimate_tokens(current + sent) > HARD_CAP and current:
+                if estimate_tokens(current + sent) > CHUNK_THRESHOLD and current:
                     chunks.append(current.strip())
-                    current = sent
+                    current = sent + " "
                 else:
                     current += sent + " "
             continue
 
         if estimate_tokens(current + para) > CHUNK_THRESHOLD and current:
             chunks.append(current.strip())
-            current = para
+            current = para + "\n\n"
         else:
             current += para + "\n\n"
 

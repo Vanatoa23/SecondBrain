@@ -90,7 +90,9 @@ INGEST_TIMEOUT_S = 600  # per-candidate timeout on the serve child
 # ---------------------------------------------------------------------------
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-BULLET_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
+# Bullets (unordered -/*/+) AND numbered-list items (1. / 1) ).
+BULLET_RE = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$")
 BULLET_KIND_RE = re.compile(r"^(lesson|decision)\s*:\s*(.+)$", re.IGNORECASE)
 # Section headings that mark lesson-bearing content.
 LESSON_HEADING_RE = re.compile(
@@ -197,6 +199,9 @@ def parse_lessons(text: str) -> list[dict]:
     Returns a list of {"kind": "lesson"|"decision", "title": str, "text": str}
     in document order, deduplicated by normalized text, capped at
     MAX_CANDIDATES_PER_FILE. Never raises on arbitrary input.
+
+    Heading detection ignores '#' lines inside fenced code blocks (```/~~~);
+    both bullet (-/*/+) and numbered-list (1./1)) items count as bullets.
     """
     candidates: list[dict] = []
     seen: set = set()
@@ -204,6 +209,7 @@ def parse_lessons(text: str) -> list[dict]:
     section: dict | None = None  # {"kind": str} — the open lesson/decision section
     open_bullet: list[str] | None = None  # lines of the bullet being accumulated
     para: list[str] | None = None  # lines of the prose paragraph being accumulated
+    in_fence: bool = False  # inside a fenced code block (``` / ~~~)
 
     def flush_bullet() -> None:
         nonlocal open_bullet
@@ -233,6 +239,16 @@ def parse_lessons(text: str) -> list[dict]:
 
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
+        # Fenced code blocks: a '#' line inside a fence is CODE, not a heading
+        # (track the fence state so it can never open/close a lesson section),
+        # and no fence content is parsed as bullet/prose either.
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+            flush_bullet()
+            flush_para()
+            continue
+        if in_fence:
+            continue
         hm = HEADING_RE.match(line)
         if hm:
             flush_bullet()
@@ -323,9 +339,9 @@ def llm_refine_candidates(doc_text: str, existing: list[dict]) -> list[dict]:
         out.append({
             "kind": etype,
             "title": name[:MAX_TITLE_LEN],
-            "text": (f"{name} — {etype} identified by LLM refinement of a "
-                     f"lesson-bearing document (heuristic candidates are "
-                     f"ingested separately)"),
+            # The ACTUAL lesson text extracted by the LLM (the entity name),
+            # not boilerplate — this is the payload that gets ingested.
+            "text": name,
         })
     return out
 
@@ -354,13 +370,17 @@ class BridgeServe:
     The torch/model load is paid once per serve process, not once per
     candidate. A daemon reader thread feeds a queue so each request can
     time out. If the child dies it is respawned once and the request
-    retried once (mirrors the MCP server's respawn-once behavior).
+    retried once (mirrors the MCP server's respawn-once behavior); reader
+    lines are tagged with a generation counter so the stale reader queue of
+    the dead child (including its EOF sentinel) can never feed the new
+    process.
     """
 
     def __init__(self, database_url: str):
         self._database_url = database_url
         self._next_id = 1
         self._lines: queue.Queue = queue.Queue()
+        self._gen = 0  # generation counter — stale readers of a dead child are ignored
         self.proc: subprocess.Popen | None = None
         self._spawn()
 
@@ -377,17 +397,19 @@ class BridgeServe:
             text=True,
             bufsize=1,
         )
-        reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._gen += 1
+        gen = self._gen
+        reader = threading.Thread(target=self._read_loop, args=(gen,), daemon=True)
         reader.start()
 
-    def _read_loop(self) -> None:
+    def _read_loop(self, gen: int) -> None:
         try:
             for line in self.proc.stdout:
-                self._lines.put(line)
+                self._lines.put((gen, line))
         except Exception:
             pass
         finally:
-            self._lines.put(None)  # EOF sentinel: the serve child is gone
+            self._lines.put((gen, None))  # EOF sentinel: this serve child is gone
 
     def request(self, command: str, args: dict, timeout: float = INGEST_TIMEOUT_S) -> dict:
         """Send one request and return the id-matched response envelope.
@@ -419,9 +441,14 @@ class BridgeServe:
                 item = self._lines.get(timeout=remaining)
             except queue.Empty:
                 raise TimeoutError(f"no response to {command!r} within {timeout}s") from None
-            if item is None:
+            gen, raw = item
+            if gen != self._gen:
+                # Stale line/sentinel from the PREVIOUS (dead) child — never
+                # let the old reader queue feed the new process.
+                continue
+            if raw is None:
                 raise EOFError("bridge serve process exited")
-            item = item.strip()
+            item = raw.strip()
             if not item:
                 continue
             try:

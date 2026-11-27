@@ -4,7 +4,6 @@ Read-only usage — retrieval never modifies data.
 All queries use parameterized statements exclusively.
 """
 
-import json
 import os
 from contextlib import contextmanager
 
@@ -23,49 +22,17 @@ def get_database_url() -> str:
 
 
 def _register_vector_loader(conn) -> None:
-    """Load pgvector ``vector`` columns as numpy float32 arrays.
+    """Load pgvector ``vector`` columns as numpy arrays via pgvector.psycopg.
 
-    Retrieval consumers index ``row["embedding"]`` as a numpy array, so we
-    register loaders that decode the vector straight into an ``np.ndarray``
-    (pgvector's default loader returns a ``Vector`` object numpy cannot
-    convert). Silently does nothing when the pgvector extension is absent.
+    ``register_vector(conn)`` registers the official loaders (text + binary,
+    correct endianness); with numpy installed they return ``np.ndarray``,
+    which vector search / dedup / ingest index directly. Silently does
+    nothing when the pgvector extension (or package) is absent.
     """
     try:
-        import numpy as np
-        from psycopg.abc import Buffer
-        from psycopg.adapt import Loader
-        from psycopg.pq import Format
-        from psycopg.types import TypeInfo
-    except ImportError:
-        return
+        from pgvector.psycopg import register_vector
 
-    class _VectorTextLoader(Loader):
-        format = Format.TEXT
-
-        def load(self, data: Buffer):
-            if data is None:
-                return None
-            if isinstance(data, memoryview):
-                data = data.tobytes()
-            return np.array(json.loads(data.decode("utf-8")), dtype=np.float32)
-
-    class _VectorBinaryLoader(Loader):
-        format = Format.BINARY
-
-        def load(self, data: Buffer):
-            if data is None:
-                return None
-            if isinstance(data, memoryview):
-                data = data.tobytes()
-            dim = int.from_bytes(data[:4], "little")
-            return np.frombuffer(data[4:4 + 4 * dim], dtype="<f4").astype(np.float32)
-
-    try:
-        info = TypeInfo.fetch(conn, "vector")
-        if info is not None:
-            info.register(conn)
-            conn.adapters.register_loader(info.oid, _VectorTextLoader)
-            conn.adapters.register_loader(info.oid, _VectorBinaryLoader)
+        register_vector(conn)
     except Exception:
         pass  # pgvector extension not installed — embedding column unused
 

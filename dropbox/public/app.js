@@ -93,15 +93,29 @@ function initInsertPage() {
   const fileInput = document.getElementById('file-input');
   const titleInput = document.getElementById('title-input');
 
+  // All 7 bridge source types. Panels are grouped: text gets the textarea;
+  // url/youtube/github share the URL input; pdf/image/audio share the file
+  // input (upload-then-ingest: POST /api/upload, then /api/ingest the path).
   const panels = {
     text: document.getElementById('panel-text'),
     url: document.getElementById('panel-url'),
-    file: document.getElementById('panel-file'),
+    youtube: document.getElementById('panel-url'),
+    github: document.getElementById('panel-url'),
+    pdf: document.getElementById('panel-file'),
+    image: document.getElementById('panel-file'),
+    audio: document.getElementById('panel-file'),
+  };
+  const FILE_ACCEPT = {
+    pdf: '.pdf',
+    image: '.png,.jpg,.jpeg,.gif,.webp,.bmp',
+    audio: '.wav,.mp3,.m4a,.ogg,.flac',
   };
   for (const input of form.elements.mode) {
     input.addEventListener('change', () => {
       const mode = form.elements.mode.value;
-      for (const [key, panel] of Object.entries(panels)) panel.hidden = key !== mode;
+      const active = panels[mode];
+      for (const panel of new Set(Object.values(panels))) panel.hidden = panel !== active;
+      if (FILE_ACCEPT[mode]) fileInput.accept = FILE_ACCEPT[mode];
     });
   }
 
@@ -157,20 +171,17 @@ function initInsertPage() {
       if (mode === 'text') {
         if (!rawText.value.trim()) throw new Error('text is empty');
         args = { source_type: 'text', payload: rawText.value, source_uri: null, title: title || null };
-      } else if (mode === 'url') {
+      } else if (mode === 'url' || mode === 'youtube' || mode === 'github') {
         const url = urlInput.value.trim();
         if (!url) throw new Error('URL is empty');
-        args = { source_type: 'url', payload: url, source_uri: url, title: title || null };
+        args = { source_type: mode, payload: url, source_uri: url, title: title || null };
       } else {
+        // pdf | image | audio: the payload is the dropbox/inbox path of the
+        // uploaded file — upload first, then ingest with the returned path.
         const file = fileInput.files[0];
         if (!file) throw new Error('no file selected');
         const filePath = await uploadFile(file); // saved under dropbox/inbox/
-        if (file.name.toLowerCase().endsWith('.pdf')) {
-          args = { source_type: 'pdf', payload: filePath, source_uri: filePath, title: title || null };
-        } else {
-          const content = await file.text(); // .txt / .md read client-side, path kept as source_uri
-          args = { source_type: 'text', payload: content, source_uri: filePath, title: title || null };
-        }
+        args = { source_type: mode, payload: filePath, source_uri: filePath, title: title || null };
       }
 
       const resp = await fetch('/api/ingest', {
@@ -253,7 +264,13 @@ function initReviewPage() {
       });
       const json = await resp.json();
       if (!resp.ok || !json.ok) throw new Error(json.error || `HTTP ${resp.status}`);
-      renderQueue(json.queue);
+      // /api/review-decision delegates to the bridge and returns its envelope
+      // ({"ok":true,"result":{...}}) — re-read the queue so rendering does not
+      // depend on the exact result shape.
+      const q = await fetch('/api/review-queue');
+      const qj = await q.json();
+      if (!q.ok || !qj.ok) throw new Error(qj.error || `HTTP ${q.status}`);
+      renderQueue(qj.queue);
     } catch (err) {
       clear(summary);
       summary.append(el('p', 'status status-error', `Decision failed: ${err.message}`));
@@ -322,8 +339,11 @@ function initReviewPage() {
       for (const reason of order) {
         const entries = groups.get(reason);
         const section = el('section', 'panel reason-group');
-        section.append(el('h2', null, `${REASON_LABELS[reason] || reason} `).append(
-          el('span', 'count', `(${entries.length})`)));
+        // Build the h2 first (native append() returns undefined — chaining it
+        // into section.append used to render the literal text "undefined").
+        const heading = el('h2', null, `${REASON_LABELS[reason] || reason} `);
+        heading.append(el('span', 'count', `(${entries.length})`));
+        section.append(heading);
         const list = el('ol', 'flags');
         for (const e of entries) list.append(flagItem(e, queue, false));
         section.append(list);

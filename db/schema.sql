@@ -3,6 +3,7 @@
 -- Locked spec: see PM_LEDGER.md [2026-11-25 17:56] ARCHITECTURE: Database schema v1 locked
 
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- ---------------------------------------------------------------------------
 -- knowledge_items: every node in the knowledge graph.
@@ -61,6 +62,12 @@ CREATE INDEX IF NOT EXISTS idx_relationships_from ON relationships (from_id);
 CREATE INDEX IF NOT EXISTS idx_relationships_to   ON relationships (to_id);
 CREATE INDEX IF NOT EXISTS idx_items_source_doc     ON knowledge_items (source_document_id);
 CREATE INDEX IF NOT EXISTS idx_items_created        ON knowledge_items (created_at);
+
+-- Lookup indexes for dedup / versioning paths (source_uri match, whole-document
+-- and content hashes stored in metadata)
+CREATE INDEX IF NOT EXISTS idx_items_source_uri     ON knowledge_items (source_uri);
+CREATE INDEX IF NOT EXISTS idx_items_document_hash  ON knowledge_items ((metadata->>'document_hash'));
+CREATE INDEX IF NOT EXISTS idx_items_content_hash   ON knowledge_items ((metadata->>'content_hash'));
 
 -- Partial UNIQUE index on entity:// source URIs (audit-E/F LOW fix): LLM-extracted
 -- entity nodes are addressed by source_uri = "entity://<slug>". This index makes the

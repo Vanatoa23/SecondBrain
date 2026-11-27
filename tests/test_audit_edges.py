@@ -232,6 +232,7 @@ def patched_ingest_pipeline(fake_conn):
     emb = np.full(1024, 0.001, dtype=np.float32)
     with mock.patch.object(ingest_mod, "get_connection", lambda: fake_get_connection()), \
          mock.patch.object(ingest_mod, "embed_texts", lambda texts: [emb for _ in texts]), \
+         mock.patch.object(ingest_mod, "embed_text", lambda text: emb), \
          mock.patch.object(dedup_mod, "embed_text", lambda text: emb):
         yield
 
@@ -243,7 +244,7 @@ def test_ingest_outer_hook_except_is_sanitized():
     key = "sk-audit-regression-key-456"
     fake_conn = FakeConn()
 
-    def boom(text, source_uri, conn):
+    def boom(text, source_uri, conn, doc_id=None):
         raise RuntimeError(f"endpoint said: Bearer {key} (key={key})")
 
     with mock.patch.dict(os.environ, {"EXTRACT_ENABLED": "1", "EXTRACT_API_KEY": key}), \

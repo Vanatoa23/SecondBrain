@@ -109,6 +109,8 @@ def test_auto_link_selects_embedding_in_single_query():
             queries.append(sql)
             if "ORDER BY embedding <=>" in sql:
                 return _Rows(candidates)
+            if sql.strip().upper().startswith("SELECT") and "FROM RELATIONSHIPS" in sql.upper():
+                return _Rows([])  # no existing edge in either direction
             if sql.strip().upper().startswith("INSERT INTO RELATIONSHIPS"):
                 return _Rows([{"id": "rel-1"}])
             raise AssertionError(f"unexpected query: {sql!r}")
@@ -121,9 +123,15 @@ def test_auto_link_selects_embedding_in_single_query():
         ingest_mod.embed_texts = orig_embed
 
     assert rels == ["rel-1"], rels  # only the similar candidate was linked
-    selects = [s for s in queries if s.strip().upper().startswith("SELECT")]
-    assert len(selects) == 1, f"auto_link must issue exactly ONE SELECT, got {len(selects)}: {selects}"
-    assert "embedding" in selects[0], "the single SELECT must return the embedding column too"
+    # The candidate SELECT (with the embedding column) must still be a SINGLE
+    # query — no per-candidate re-SELECT of embeddings (the old N+1). The only
+    # other SELECTs are the per-candidate edge-existence checks on relationships.
+    cand_selects = [s for s in queries if "ORDER BY embedding <=>" in s]
+    assert len(cand_selects) == 1, (
+        f"auto_link must issue exactly ONE candidate SELECT, got {len(cand_selects)}: {cand_selects}"
+    )
+    assert "embedding" in cand_selects[0], "the candidate SELECT must return the embedding column too"
+    assert "IS DISTINCT FROM" in cand_selects[0], "candidates must exclude same-source rows"
 
 
 # --- merge / staleness ------------------------------------------------------

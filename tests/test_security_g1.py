@@ -1,8 +1,9 @@
 """Security regression tests for fix worker G1 (second double audit, audit-C/audit-D).
 
 Covers the bridge path-confinement fix (pdf/image/audio payloads are
-server-side paths and must live under dropbox/inbox/, the system temp dir,
-or a BRIDGE_PATH_ALLOWLIST entry) and the serve-mode decode-robustness fix
+server-side paths and must live under dropbox/inbox/, the
+<tempdir>/secondbrain-staging staging dir, or a BRIDGE_PATH_ALLOWLIST entry)
+and the serve-mode decode-robustness fix
 (one undecodable stdin line must not kill the persistent loop).
 
 No DB required: every bridge subprocess runs with DATABASE_URL stripped, so
@@ -113,13 +114,28 @@ def test_ingest_pdf_traversal_through_inbox_refused():
     assert_refused_outside_roots(proc, env)
 
 
-# --- allowed roots: temp dir + dropbox/inbox ----------------------------------
+# --- allowed roots: staging temp dir + dropbox/inbox ---------------------------
+# (audit W3: the whole system temp dir is no longer an allowed root — only
+# <tempdir>/secondbrain-staging is, so other temp-dir files cannot be ingested)
 
 
-def test_ingest_pdf_tmpdir_file_passes_path_check():
+def test_ingest_pdf_plain_tmpdir_file_refused():
     fd, name = tempfile.mkstemp(prefix="g1_pdf_", suffix=".pdf")
     try:
         with os.fdopen(fd, "wb") as fh:
+            fh.write(MINI_PDF)
+        proc, env = run_bridge_no_db("ingest", {"source_type": "pdf", "payload": name})
+        assert_refused_outside_roots(proc, env)
+    finally:
+        os.unlink(name)
+
+
+def test_ingest_pdf_tmpdir_file_passes_path_check():
+    staging = os.path.join(tempfile.gettempdir(), "secondbrain-staging")
+    os.makedirs(staging, exist_ok=True)
+    name = os.path.join(staging, f"g1_pdf_{uuid.uuid4().hex[:8]}.pdf")
+    try:
+        with open(name, "wb") as fh:
             fh.write(MINI_PDF)
         proc, env = run_bridge_no_db("ingest", {"source_type": "pdf", "payload": name})
         assert_passed_path_check(proc, env)

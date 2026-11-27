@@ -1,5 +1,7 @@
 # PM Handover Prompt — Second Brain Project
 
+> **SUPERSEDED 2026-11-27** (Phases 0-4 complete; published to GitHub Vanatoa23/SecondBrain PR #1 + docs PR #2). Kept for historical context only.
+
 Paste this as the first message in a NEW PM session (started directly by you, not by another session — that way it can spawn worker agents).
 
 ---
