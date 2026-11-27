@@ -1,0 +1,14 @@
+{
+  "_warning": "WRITE SCOPE — this server process can mutate the knowledge base (add/update/delete/link items, flag issues, review decisions). The write scope only starts when SECONDBRAIN_WRITE_TOKEN is set to a non-empty secret: the token gates the write server, and without it the process exits 1 before the transport connects. Replace the placeholder below with a long random token from your env/secret manager (never committed to git), and only attach this server to TRUSTED agents. For untrusted/coding agents use the read-scope server instead (see claude_desktop.config.json / claude_code.mcp.json).",
+  "mcpServers": {
+    "secondbrain-write": {
+      "command": "node",
+      "args": ["C:/path/to/SecondBrain/mcp-server/dist/index.js"],
+      "env": {
+        "DATABASE_URL": "postgresql://postgres@127.0.0.1:5432/secondbrain",
+        "SECONDBRAIN_MCP_SCOPE": "write",
+        "SECONDBRAIN_WRITE_TOKEN": "<set-a-long-random-token>"
+      }
+    }
+  }
+}
