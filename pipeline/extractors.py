@@ -11,6 +11,21 @@ It is stored as content and returned as data only — never executed, rendered
 as instructions, or treated as commands. extract_url additionally refuses to
 fetch any URL that is not a public http(s) address (SSRF guard, see
 _assert_public_url below).
+
+Phase 5 audit hooks: before the vision POST to {VISION_API_URL}/chat/completions,
+audit.check_external_send + an "external_send" event run (see
+_audit_gate_external_send); extract_url / extract_youtube log an
+"external_fetch" (purpose="ingest") event before fetching inbound content —
+with endpoint=<hostname> + url_sha256=<sha256(url)[:16]> only, NEVER the raw
+URL (it may carry ?api_key=... secrets). When the repo-root audit module is
+not importable these degrade to the local checks only — UNLESS
+SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL is enabled, in which case outbound sends
+FAIL CLOSED (RuntimeError: audit module unavailable — refusing).
+
+Redirects on the vision POST are followed MANUALLY (allow_redirects=False,
+max 3 hops): every 3xx Location is resolved against the current URL and
+re-gated (audit.check_external_send + an external_send event with the new
+endpoint host) BEFORE the re-POST, so a redirect can never bypass the gate.
 """
 
 
@@ -41,6 +56,10 @@ def _sanitize(message) -> str:
     import re
 
     s = str(message)
+    # Redact URL query strings / fragments FIRST (a signed URL may carry
+    # ?api_key=... secrets): https://host/path?x=y#frag -> https://host/path?<redacted>
+    # (same pattern as the bridge _sanitize_error fix).
+    s = re.sub(r"(?i)(https?://[^?#\s]+)[?#][^\s]*", r"\1?<redacted>", s)
     s = re.sub(r"(?i)\bbearer\s+[^\s,;\"']+", "bearer <redacted>", s)
     s = re.sub(r"(?i)(authorization\s*[:=]\s*)[^\s,;\"']+", r"\1<redacted>", s)
     s = re.sub(r"(?i)([?&]api_key=)[^&#\s]+", r"\1<redacted>", s)
@@ -49,6 +68,169 @@ def _sanitize(message) -> str:
         if val:
             s = s.replace(val, "<redacted-api-key>")
     return s
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 audit hooks (repo-root audit.py — worker W1). The audit module is
+# imported lazily inside the functions: when it is not importable, outbound
+# calls degrade to the local scheme/SSRF checks only, and no events are
+# logged. log_event never raises by contract; the wrappers guard anyway.
+# ---------------------------------------------------------------------------
+
+
+def _load_audit():
+    """Lazily import the repo-root `audit` module; None when unavailable."""
+    try:
+        import audit
+        return audit
+    except Exception:
+        return None
+
+
+def _approval_required() -> bool:
+    """True when SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL enables the gate —
+    mirrors audit.check_external_send / audit._gate_enabled EXACTLY: unset
+    -> False; any value not in ("", "0", "false", "no", "off")
+    (case/whitespace-insensitive) -> True (unrecognized values fail closed)."""
+    import os
+
+    v = os.environ.get("SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL")
+    return v is not None and v.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _safe_host(url: str) -> str | None:
+    """Extract hostname without raising ValueError on malformed URLs."""
+    from urllib.parse import urlsplit
+
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
+def _url_origin(url: str) -> tuple[str, str, int | None]:
+    """Return normalized (scheme, host, effective_port) for origin comparison."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return ("", "", None)
+    if port is None:
+        port = 443 if scheme == "https" else (80 if scheme == "http" else None)
+    return (scheme, host, port)
+
+
+def _strip_auth_headers(headers: dict) -> dict:
+    """Return a copy of headers with Authorization removed (case-insensitive)."""
+    return {k: v for k, v in headers.items() if k.lower() != "authorization"}
+
+
+def _fail_closed_when_audit_missing(audit) -> None:
+    """Fail closed (audit-A finding 3): when external approval is required but
+    the audit module is not importable, refuse instead of proceeding silently.
+    When the requirement is unset, a missing audit module stays a no-op."""
+    if audit is None and _approval_required():
+        raise RuntimeError(
+            "external approval required but audit module unavailable — refusing"
+        )
+
+
+def _audit_gate_external_send(api_url: str, *, purpose: str,
+                              model: str | None, payload: dict) -> None:
+    """Gate + audit-log an OUTBOUND send (vision POST), BEFORE the request.
+
+    audit.check_external_send(api_url) raises PermissionError when
+    SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL is enabled and the host is not
+    allowlisted; the PermissionError becomes a clean RuntimeError through
+    _sanitize. After the gate passes, one "external_send" event is logged.
+
+    Fail closed: when approval is required but the audit module is missing,
+    raises RuntimeError instead of proceeding (audit-A finding 3).
+    """
+    import json
+
+    audit = _load_audit()
+    if audit is None:
+        _fail_closed_when_audit_missing(audit)
+        return
+    try:
+        audit.check_external_send(api_url)
+    except PermissionError as exc:
+        raise RuntimeError(
+            _sanitize(
+                f"external send to host {_safe_host(api_url)!r} refused "
+                f"(external approval required): {exc}"
+            )
+        ) from exc
+    body_bytes = json.dumps(payload).encode("utf-8")
+    try:
+        audit.log_event(
+            "external_send",
+            direction="out",
+            endpoint=_safe_host(api_url),
+            purpose=purpose,
+            model=model,
+            payload_bytes=len(body_bytes),
+        )
+    except Exception:
+        pass  # audit logging must never break the caller
+
+
+def _regate_redirect_hop(new_url: str, *, purpose: str,
+                         model: str | None, payload: dict) -> None:
+    """Re-gate a redirect hop BEFORE re-POSTing (audit-A finding 2).
+
+    Runs audit.check_external_send(new_url) — the PermissionError propagates
+    UNCONVERTED, so a 3xx to a non-allowlisted host is refused before any
+    request is made to it — and logs one "external_send" event with the NEW
+    endpoint host. Fail closed when approval is required but audit is missing.
+    """
+    import json
+
+    audit = _load_audit()
+    if audit is None:
+        _fail_closed_when_audit_missing(audit)
+        return
+    audit.check_external_send(new_url)  # PermissionError propagates
+    body_bytes = json.dumps(payload).encode("utf-8")
+    try:
+        audit.log_event(
+            "external_send",
+            direction="out",
+            endpoint=_safe_host(new_url),
+            purpose=purpose,
+            model=model,
+            payload_bytes=len(body_bytes),
+        )
+    except Exception:
+        pass  # audit logging must never break the caller
+
+
+def _audit_log_external_fetch(url: str) -> None:
+    """Audit-trail an INBOUND third-party fetch (no gate — ingest side).
+
+    NEVER logs the raw URL — it may carry ?api_key=... secrets (audit-B
+    F2/A4): only the endpoint hostname and a 16-hex sha256 of the full URL.
+    """
+    import hashlib
+    from urllib.parse import urlsplit
+
+    audit = _load_audit()
+    if audit is None:
+        return
+    try:
+        audit.log_event(
+            "external_fetch",
+            endpoint=urlsplit(url).hostname,
+            url_sha256=hashlib.sha256(url.encode("utf-8")).hexdigest()[:16],
+            purpose="ingest",
+        )
+    except Exception:
+        pass  # audit logging must never break the caller
 
 
 def _assert_public_url(url: str) -> list[str]:
@@ -227,10 +409,22 @@ def extract_url(url: str) -> ExtractionResult:
     MANUALLY (allow_redirects=False, max _MAX_URL_REDIRECTS hops; each
     Location, absolute or relative, is re-validated and re-pinned before it
     is fetched). The response is streamed with a hard 10 MB body cap and
-    always closed (finally).
+    always closed (finally). All error text is routed through _sanitize, so a
+    signed URL's query string / fragment can never leak into an exception
+    message (audit-B F2/A4).
     """
+    try:
+        return _extract_url_inner(url)
+    except ValueError as exc:
+        raise ValueError(_sanitize(str(exc))) from None
+
+
+def _extract_url_inner(url: str) -> ExtractionResult:
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin
+
+    # Phase 5 audit trail: inbound third-party fetch (no gate) before any request.
+    _audit_log_external_fetch(url)
 
     current = url
     for hop in range(_MAX_URL_REDIRECTS + 1):
@@ -318,6 +512,10 @@ def extract_pdf(path_or_bytes: str | bytes) -> ExtractionResult:
 # Vision-LLM interpretation (extract_image): enabled when VISION_API_URL and
 # VISION_MODEL are set; VISION_API_KEY is optional (Bearer auth when present).
 # The endpoint must be OpenAI-compatible (POST {VISION_API_URL}/chat/completions).
+# Redirects on the vision POST are followed MANUALLY (allow_redirects=False,
+# max _MAX_API_REDIRECTS hops, re-gated per hop) — see _extract_image_vision.
+_API_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+_MAX_API_REDIRECTS = 3
 _VISION_PROMPT = (
     "Describe this image/screenshot in detail. Transcribe ALL visible text "
     "exactly. Then summarize what it shows."
@@ -444,18 +642,61 @@ def _extract_image_vision(path_or_bytes: str | bytes) -> str:
     # exceptions and HTTPError echo the request URL (which may carry
     # ?api_key=...) and headers (Authorization: Bearer ...), so the raw
     # exception must never propagate or be printed as-is.
-    try:
-        resp = requests.post(
-            api_url.rstrip("/") + "/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=_VISION_TIMEOUT_S,
-        )
-        resp.raise_for_status()
-    except Exception as exc:
-        raise RuntimeError(
-            _sanitize(f"vision endpoint request failed ({type(exc).__name__}: {exc})")
-        ) from exc
+    # Phase 5 external-send gate: BEFORE the POST to {VISION_API_URL}/chat/completions.
+    _audit_gate_external_send(api_url, purpose="vision", model=model, payload=payload)
+    # Redirects are followed MANUALLY (allow_redirects=False, max
+    # _MAX_API_REDIRECTS hops): every 3xx Location is resolved against the
+    # current URL and re-gated via _regate_redirect_hop BEFORE the re-POST
+    # (audit-A finding 2), so a redirect can never bypass the external-send
+    # gate. A 3xx without Location or too many hops raises ValueError.
+    from urllib.parse import urljoin as _urljoin
+
+    current_url = api_url.rstrip("/") + "/chat/completions"
+    current_headers = headers
+    hops = 0
+    while True:
+        try:
+            resp = requests.post(
+                current_url,
+                headers=current_headers,
+                json=payload,
+                timeout=_VISION_TIMEOUT_S,
+                allow_redirects=False,  # manual, re-gated redirect loop
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                _sanitize(f"vision endpoint request failed ({type(exc).__name__}: {exc})")
+            ) from exc
+        if resp.status_code in _API_REDIRECT_STATUSES:
+            location = resp.headers.get("Location")
+            if not location:
+                raise ValueError(
+                    _sanitize(f"vision endpoint returned redirect status "
+                              f"{resp.status_code} without a Location header "
+                              f"(from {_sanitize(current_url)[:200]})")
+                )
+            if hops >= _MAX_API_REDIRECTS:
+                raise ValueError(
+                    _sanitize(f"vision endpoint redirected more than "
+                              f"{_MAX_API_REDIRECTS} times (last hop from "
+                              f"{_sanitize(current_url)[:200]} to {_sanitize(location)[:200]})")
+                )
+            new_url = _urljoin(current_url, location)  # absolute or relative
+            hops += 1
+            # Re-gate + re-log EVERY hop before re-POSTing; PermissionError
+            # propagates — refused before dialing the new host.
+            _regate_redirect_hop(new_url, purpose="vision", model=model, payload=payload)
+            if _url_origin(new_url) != _url_origin(current_url):
+                current_headers = _strip_auth_headers(current_headers)
+            current_url = new_url
+            continue
+        try:
+            resp.raise_for_status()
+        except Exception as exc:
+            raise RuntimeError(
+                _sanitize(f"vision endpoint request failed ({type(exc).__name__}: {exc})")
+            ) from exc
+        break
     try:
         content = resp.json()["choices"][0]["message"]["content"]
     except Exception as exc:
@@ -635,6 +876,9 @@ def extract_youtube(url: str, runner=None) -> ExtractionResult:
     """
     import os
     import tempfile
+
+    # Phase 5 audit trail: inbound third-party fetch (no gate) before fetching.
+    _audit_log_external_fetch(url)
 
     _assert_youtube_url(url)
     if runner is None:

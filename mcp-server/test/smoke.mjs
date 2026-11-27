@@ -21,6 +21,27 @@
  *     dies mid-request has its pending JSON-RPC requests REJECTED on
  *     exit/close instead of hanging until the ~240 s request timeout
  *
+ * Phase 5 scope cases (least-privilege read/write server scopes):
+ *   - (a) SECONDBRAIN_MCP_SCOPE=read: tools/list is EXACTLY the 6 read-only
+ *     tools (search, get_related, list_recent, dream, get_project_context,
+ *     discover_relevant) and no mutating tool (add_knowledge/delete_item/...)
+ *     is registered, and the dream tool description documents that read scope
+ *     forces dry_run=true (dry-run only). The main child above runs with the
+ *     scope env unset = legacy DEFAULT scope, asserted to be EXACTLY the
+ *     original 8 locked tools (backwards compat with
+ *     tests/test_mcp_acceptance.py) AND to print the LOUD startup stderr
+ *     warning that the default scope exposes mutating tools with no token gate.
+ *   - (b) SECONDBRAIN_MCP_SCOPE=write WITHOUT SECONDBRAIN_WRITE_TOKEN: the
+ *     process exits non-zero FAST (before the transport connects) with a
+ *     stderr message naming SECONDBRAIN_WRITE_TOKEN.
+ *   - (c) write scope WITH a token: tools/list exposes all 12 tools incl.
+ *     flag_issue and review_decision.
+ *   - (d) with a test DB: write-scope server with SECONDBRAIN_FLAG_QUEUE and
+ *     SECONDBRAIN_AUDIT_LOG pointed at tmp files — flag_issue called twice
+ *     with identical args yields exactly ONE quarantine queue entry, and the
+ *     audit log contains mcp_write_scope_start + mcp_tool_write (flag_issue)
+ *     events with a 16-hex args_sha256 (raw args never logged).
+ *
  * Guard pattern (locked — same invariant as tests/test_e2e.py): the DB is
  * selected from TEST_DATABASE_URL ONLY (never DATABASE_URL). The dbname must
  * match (^|_)test(_|$) case-insensitively, otherwise the script refuses with
@@ -40,6 +61,8 @@
 
 import { spawn, execSync, spawnSync } from "node:child_process";
 import net from "node:net";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -117,6 +140,10 @@ if (testDbUrl) {
 const childEnv = { ...process.env };
 if (dbUrl) childEnv.DATABASE_URL = dbUrl;
 else delete childEnv.DATABASE_URL; // never let a stray DATABASE_URL select the DB
+// The main server child below runs in the legacy DEFAULT scope — make sure no
+// stray scope env leaks in from the outer environment.
+delete childEnv.SECONDBRAIN_MCP_SCOPE;
+delete childEnv.SECONDBRAIN_WRITE_TOKEN;
 
 let passed = 0;
 function assert(cond, msg) {
@@ -168,8 +195,10 @@ child.stdout.on("data", (chunk) => {
   }
 });
 
+let childErrText = "";
 child.stderr.on("data", (d) => {
   const s = d.toString("utf8");
+  childErrText += s;
   if (s.trim()) console.error(`[server stderr] ${s.trim()}`);
 });
 
@@ -231,6 +260,76 @@ function parseText(r) {
   return JSON.parse(r.content[0].text);
 }
 
+// --- Phase 5: spawn a server instance with extra env, run fn(api), kill it ----
+// Used for the scope cases (read/write tool lists, token gate, flag_issue
+// round-trip). Speaks the same newline-delimited JSON-RPC framing as above.
+async function withServerInstance(envExtra, fn) {
+  const proc = spawn(process.execPath, [serverEntry], {
+    cwd: serverDir,
+    shell: false,
+    env: { ...childEnv, ...envExtra },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  proc.stdin.on("error", () => { /* child may already be dead — exit handler rejects pending */ });
+  let buf = "";
+  const pend = new Map();
+  let nid = 1;
+  proc.stdout.on("data", (chunk) => {
+    buf += chunk.toString("utf8");
+    let idx;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      let msg;
+      try { msg = JSON.parse(line); } catch { continue; }
+      if (msg && msg.id !== undefined && pend.has(msg.id)) {
+        const { resolve, timer } = pend.get(msg.id);
+        clearTimeout(timer);
+        pend.delete(msg.id);
+        resolve(msg);
+      }
+    }
+  });
+  const onDead = (why) => {
+    for (const [, p] of pend) { clearTimeout(p.timer); p.reject(new Error(why)); }
+    pend.clear();
+  };
+  proc.on("exit", (code) => onDead(`server process exited (code ${code})`));
+  proc.on("close", (code, signal) => onDead(`server process closed (code ${code}, signal ${signal})`));
+  const request = (method, params) => new Promise((resolve, reject) => {
+    const id = nid++;
+    const timer = setTimeout(() => {
+      pend.delete(id);
+      reject(new Error(`timeout waiting for response to ${method}`));
+    }, REQUEST_TIMEOUT_MS);
+    pend.set(id, { resolve, timer });
+    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+  });
+  const api = {
+    request,
+    toolsList: async () => (await request("tools/list", {})).result.tools,
+    callTool: async (name, args) => (await request("tools/call", { name, arguments: args })).result,
+  };
+  try {
+    const init = await request("initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "smoke-scope", version: "0.1.0" },
+    });
+    assert(init.result && init.result.protocolVersion, "scope instance: initialize answered");
+    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+    await fn(api);
+  } finally {
+    try {
+      proc.kill();
+      if (isWin && proc.pid) {
+        try { execSync(`taskkill /pid ${proc.pid} /T /F`, { stdio: "ignore" }); } catch { /* already gone */ }
+      }
+    } catch { /* ignore */ }
+  }
+}
+
 async function main() {
   // --- fast-failure cases (no DB needed) --------------------------------------
   // (a) PYTHON=/nonexistent: the server must still answer initialize quickly
@@ -277,7 +376,7 @@ async function main() {
           badPending.delete(id);
           reject(new Error(`timeout waiting for response to ${method}`));
         }, REQUEST_TIMEOUT_MS);
-        badPending.set(id, { resolve, timer });
+        badPending.set(id, { resolve, reject, timer });
         bad.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
       });
     };
@@ -350,6 +449,83 @@ async function main() {
     assert(dPending.size === 0, "crashed child: pending map drained on exit/close");
   }
 
+  // --- Phase 5 scope cases (no DB needed) --------------------------------------
+  // (a) explicit READ scope: tools/list is EXACTLY the 6 read-only tools; no
+  //     mutating tool is registered. PYTHON is bogus on purpose — tools/list
+  //     never touches the bridge, and the background warm-up fails fast.
+  await withServerInstance(
+    { SECONDBRAIN_MCP_SCOPE: "read", PYTHON: "/nonexistent/python-w2-smoke" },
+    async (api) => {
+      const names = (await api.toolsList()).map((t) => t.name).sort();
+      const expectedRead = ["discover_relevant", "dream", "get_project_context", "get_related", "list_recent", "search"];
+      assert(
+        JSON.stringify(names) === JSON.stringify(expectedRead),
+        `read scope: tools/list is exactly the 6 read-only tools (got: ${names.join(", ")})`,
+      );
+      assert(
+        !names.includes("add_knowledge") && !names.includes("delete_item") &&
+          !names.includes("update_item") && !names.includes("link_items") && !names.includes("flag_issue"),
+        "read scope: mutating tools NOT registered (no add_knowledge/delete_item/update_item/link_items/flag_issue)",
+      );
+
+      // read-scope dream is DRY-RUN ONLY — the tool description must say so
+      // (the handler forces args.dry_run=true; audit-A finding 1).
+      const dreamTool = (await api.toolsList()).find((t) => t.name === "dream");
+      assert(
+        dreamTool && /dry_run\s*=\s*true/i.test(dreamTool.description || ""),
+        "read scope: dream tool description documents that dry_run=true is forced (dry-run only)",
+      );
+    },
+  );
+
+  // (b) WRITE scope WITHOUT SECONDBRAIN_WRITE_TOKEN: the process must exit
+  //     non-zero FAST (the gate runs before the transport connects) and say so
+  //     on stderr.
+  {
+    const noTokenEnv = { ...childEnv, SECONDBRAIN_MCP_SCOPE: "write" };
+    delete noTokenEnv.SECONDBRAIN_WRITE_TOKEN;
+    const proc = spawn(process.execPath, [serverEntry], {
+      cwd: serverDir, shell: false, env: noTokenEnv, stdio: ["pipe", "pipe", "pipe"],
+    });
+    proc.stdin.on("error", () => { /* may already be dead */ });
+    let errText = "";
+    proc.stderr.on("data", (d) => { errText += d.toString("utf8"); });
+    const t0 = Date.now();
+    const exitCode = await new Promise((resolve) => {
+      const killer = setTimeout(() => {
+        try { proc.kill(); } catch { /* ignore */ }
+        resolve("still-running");
+      }, 30_000);
+      proc.on("exit", (code) => { clearTimeout(killer); resolve(code); });
+    });
+    const ms = Date.now() - t0;
+    assert(
+      exitCode !== 0 && exitCode !== "still-running",
+      `write scope without SECONDBRAIN_WRITE_TOKEN exits non-zero (code ${exitCode})`,
+    );
+    assert(ms < 30_000, `write scope without token exits fast (${ms} ms < 30000 ms — before transport connect)`);
+    assert(/SECONDBRAIN_WRITE_TOKEN/.test(errText), "write scope without token: stderr names SECONDBRAIN_WRITE_TOKEN");
+    assert(!/stdio server ready/.test(errText), "write scope without token: transport never connected (no 'server ready')");
+  }
+
+  // (c) WRITE scope WITH a token: tools/list exposes all 12 tools incl.
+  //     flag_issue and review_decision.
+  await withServerInstance(
+    { SECONDBRAIN_MCP_SCOPE: "write", SECONDBRAIN_WRITE_TOKEN: "smoke-w2-write-token", PYTHON: "/nonexistent/python-w2-smoke" },
+    async (api) => {
+      const names = (await api.toolsList()).map((t) => t.name).sort();
+      const expectedAll = [
+        "add_knowledge", "delete_item", "discover_relevant", "dream", "flag_issue",
+        "get_project_context", "get_related", "link_items", "list_recent", "review_decision",
+        "search", "update_item",
+      ];
+      assert(
+        JSON.stringify(names) === JSON.stringify(expectedAll),
+        `write scope (with token): tools/list is all 12 tools incl. flag_issue (got: ${names.join(", ")})`,
+      );
+    },
+  );
+
   if (dbUrl && !(await isDbReachable(dbUrl))) {
     console.log(SKIP_MSG);
     console.log(`(connect to ${dbUrl.split("@").slice(-1)[0]} failed)`);
@@ -370,6 +546,12 @@ async function main() {
   });
   assert(init.result && init.result.protocolVersion, "initialize: result with protocolVersion");
   assert(init.result.serverInfo && init.result.serverInfo.name === "secondbrain", "initialize: serverInfo.name == secondbrain");
+  // The main child runs with SECONDBRAIN_MCP_SCOPE unset (legacy default scope):
+  // the startup stderr warning about the ungated mutating tools must be loud.
+  assert(
+    childErrText.includes("SECONDBRAIN_MCP_SCOPE is unset — default scope exposes mutating tools (add_knowledge/update_item/delete_item/link_items) with NO token gate; set SECONDBRAIN_MCP_SCOPE=read for a read-only server"),
+    "default scope (unset): startup stderr carries the LOUD warning about ungated mutating tools",
+  );
   send({ jsonrpc: "2.0", method: "notifications/initialized" });
 
   // --- tools/list -------------------------------------------------------------
@@ -378,8 +560,8 @@ async function main() {
   const names = list.result.tools.map((t) => t.name).sort();
   const expected = ["add_knowledge", "delete_item", "dream", "get_related", "link_items", "list_recent", "search", "update_item"];
   assert(
-    expected.every((n) => names.includes(n)),
-    `tools/list contains all 8 tools (got: ${names.join(", ")})`,
+    JSON.stringify(names) === JSON.stringify([...expected].sort()),
+    `default scope (SECONDBRAIN_MCP_SCOPE unset): tools/list is EXACTLY the 8 locked tools — backwards compat with tests/test_mcp_acceptance.py (got: ${names.join(", ")})`,
   );
   for (const t of list.result.tools) {
     assert(typeof t.description === "string" && t.description.length > 0, `tool ${t.name}: has description`);
@@ -508,6 +690,84 @@ async function main() {
   if (itemB) {
     const delB = assertToolResult(await callTool("delete_item", { item_id: itemB }), "delete_item (cleanup B)");
     assert(!delB.isError && parseText(delB).deleted === itemB, "delete_item (B): { deleted: item_id }");
+  }
+
+  // --- Phase 5 case (d): flag_issue round-trip + audit events (test DB only) ---
+  // The write-scope server gets SECONDBRAIN_FLAG_QUEUE / SECONDBRAIN_AUDIT_LOG
+  // pointed at tmp files (the bridge child inherits the server's env). flag_issue
+  // itself never touches the DB — it writes only to the quarantine queue.
+  if (hasDb) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sb-mcp-phase5-smoke-"));
+    try {
+      const flagQueue = path.join(tmpDir, "flagged_issues.json");
+      const auditLog = path.join(tmpDir, "audit_log.jsonl");
+      const uniq = crypto.randomUUID().slice(0, 8);
+      const flagArgs = {
+        title: `smoke flag_issue ${uniq}`,
+        description: `flag_issue round-trip probe ${uniq}: identical args twice must yield one queue entry`,
+        severity: "low",
+        reporter: "smoke-w2",
+      };
+      await withServerInstance(
+        {
+          SECONDBRAIN_MCP_SCOPE: "write",
+          SECONDBRAIN_WRITE_TOKEN: "smoke-w2-write-token",
+          SECONDBRAIN_FLAG_QUEUE: flagQueue,
+          SECONDBRAIN_AUDIT_LOG: auditLog,
+        },
+        async (api) => {
+          const names = (await api.toolsList()).map((t) => t.name);
+          assert(names.includes("flag_issue"), "write scope (DB): flag_issue is registered");
+          const r1 = await api.callTool("flag_issue", flagArgs);
+          assert(r1 && Array.isArray(r1.content) && r1.content.length > 0 && !r1.isError,
+            "flag_issue call 1: well-formed non-error result");
+          const r2 = await api.callTool("flag_issue", flagArgs);
+          assert(r2 && !r2.isError, "flag_issue call 2 (identical args): ok");
+          const p1 = JSON.parse(r1.content[0].text);
+          const p2 = JSON.parse(r2.content[0].text);
+          assert(p1.id === p2.id && p1.status === "pending",
+            "flag_issue: identical args return the same stored entry (idempotent id, status pending)");
+        },
+      );
+      // The server-originated audit events are AWAITED on the bridge (bounded
+      // ~2 s) BEFORE each mutating tool response resolves, so the events are
+      // already in the log by the time the calls below returned; poll briefly
+      // anyway to stay robust against scheduling jitter.
+      const readEvents = () => {
+        if (!fs.existsSync(auditLog)) return [];
+        return fs.readFileSync(auditLog, "utf8").split("\n")
+          .filter((l) => l.trim())
+          .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+          .filter(Boolean);
+      };
+      let events = [];
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        events = readEvents();
+        const starts = events.filter((e) => e.event === "mcp_write_scope_start");
+        const writes = events.filter((e) => e.event === "mcp_tool_write" && e.tool === "flag_issue");
+        if (starts.length >= 1 && writes.length >= 2) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      assert(events.some((e) => e.event === "mcp_write_scope_start"),
+        "audit log contains mcp_write_scope_start (write-scope startup event)");
+      const flagWrites = events.filter((e) => e.event === "mcp_tool_write" && e.tool === "flag_issue");
+      assert(flagWrites.length >= 2,
+        `audit log contains >=2 mcp_tool_write events for flag_issue (got ${flagWrites.length})`);
+      assert(flagWrites.every((e) => typeof e.args_sha256 === "string" && /^[0-9a-f]{16}$/.test(e.args_sha256)),
+        "mcp_tool_write events carry a 16-hex args_sha256");
+      assert(!JSON.stringify(events).includes(flagArgs.description),
+        "audit log never contains the raw flag args (fingerprint only)");
+      const queue = fs.existsSync(flagQueue) ? JSON.parse(fs.readFileSync(flagQueue, "utf8")) : null;
+      assert(queue && Array.isArray(queue.flagged) && queue.flagged.length === 1,
+        `flag_issue twice with identical args -> exactly ONE quarantine entry (got ${queue && queue.flagged ? queue.flagged.length : "no queue file"})`);
+      assert(queue.flagged[0].title === flagArgs.title && queue.flagged[0].status === "pending",
+        "quarantine entry carries the flagged title and status pending");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  } else {
+    console.log("NOTE: skipping Phase 5 flag_issue/audit round-trip (no TEST_DATABASE_URL)");
   }
 
   console.log(`\nSMOKE PASSED (${passed} assertions)`);

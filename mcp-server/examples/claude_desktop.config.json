@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "secondbrain-read": {
+      "command": "node",
+      "args": ["C:/path/to/SecondBrain/mcp-server/dist/index.js"],
+      "env": {
+        "DATABASE_URL": "postgresql://postgres@127.0.0.1:5432/secondbrain",
+        "SECONDBRAIN_MCP_SCOPE": "read"
+      }
+    }
+  }
+}
