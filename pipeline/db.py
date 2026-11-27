@@ -4,7 +4,6 @@ All queries use parameterized statements exclusively — never interpolate
 user content into SQL strings.
 """
 
-import json
 import os
 from contextlib import contextmanager
 
@@ -24,58 +23,44 @@ def get_database_url() -> str:
 
 
 def _register_vector_loader(conn) -> None:
-    """Load pgvector ``vector`` columns as numpy float32 arrays.
+    """Register pgvector's official ``vector`` type loaders/dumpers.
 
-    Consumers (dedup.find_duplicate, ingest.auto_link) do
-    ``np.array(row["embedding"], dtype=np.float32)``; pgvector's default
-    loader returns a ``Vector`` object that numpy cannot convert, so we
-    register loaders that decode the vector straight into an ``np.ndarray``.
-    Silently does nothing when the pgvector extension is not installed.
+    ``register_vector(conn)`` registers the text + binary loaders (correct
+    endianness) and dumpers for ``Vector`` / numpy arrays, so query params
+    that are ndarrays adapt cleanly. Silently does nothing when the pgvector
+    package or extension is not installed.
     """
     try:
-        import numpy as np
-        from psycopg.abc import Buffer
-        from psycopg.adapt import Loader
-        from psycopg.pq import Format
-        from psycopg.types import TypeInfo
-    except ImportError:
-        return
+        from pgvector.psycopg import register_vector
 
-    class _VectorTextLoader(Loader):
-        format = Format.TEXT
-
-        def load(self, data: Buffer):
-            if data is None:
-                return None
-            if isinstance(data, memoryview):
-                data = data.tobytes()
-            return np.array(json.loads(data.decode("utf-8")), dtype=np.float32)
-
-    class _VectorBinaryLoader(Loader):
-        format = Format.BINARY
-
-        def load(self, data: Buffer):
-            if data is None:
-                return None
-            if isinstance(data, memoryview):
-                data = data.tobytes()
-            dim = int.from_bytes(data[:4], "little")
-            return np.frombuffer(data[4:4 + 4 * dim], dtype="<f4").astype(np.float32)
-
-    try:
-        info = TypeInfo.fetch(conn, "vector")
-        if info is not None:
-            info.register(conn)
-            conn.adapters.register_loader(info.oid, _VectorTextLoader)
-            conn.adapters.register_loader(info.oid, _VectorBinaryLoader)
+        register_vector(conn)
     except Exception:
         pass  # pgvector extension not installed — embedding column unused
 
 
+def as_numpy(value):
+    """Convert a pgvector column value to a float32 ndarray.
+
+    ``register_vector`` loaders return ``pgvector.Vector`` objects (which
+    numpy cannot convert directly); older/custom loaders return ndarrays or
+    plain lists. Consumers (dedup.find_duplicate, ingest.auto_link) use this
+    instead of ``np.array(row["embedding"], dtype=np.float32)``.
+    """
+    import numpy as np
+
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        return value.astype(np.float32, copy=False)
+    if hasattr(value, "to_numpy"):  # pgvector.Vector
+        return value.to_numpy().astype(np.float32, copy=False)
+    return np.asarray(value, dtype=np.float32)
+
+
 @contextmanager
 def get_connection():
-    """Yield a psycopg connection with dict-row factory and numpy vector
-    loader. Auto-commits on success."""
+    """Yield a psycopg connection with dict-row factory and pgvector
+    loaders registered. Auto-commits on success."""
     conn = psycopg.connect(get_database_url(), row_factory=dict_row)
     _register_vector_loader(conn)
     try:

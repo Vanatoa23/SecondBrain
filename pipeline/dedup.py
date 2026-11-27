@@ -9,7 +9,10 @@ Checks, in order:
   2. Whole-document hash: any row whose metadata.document_hash == incoming
      document_hash -> duplicate (regardless of source_uri).
   3. Content hash (sha256 of normalized text — legacy chunk-level key)
-  4. Semantic similarity (cosine > SIMILARITY_THRESHOLD against existing embeddings)
+  4. Semantic similarity (cosine > SIMILARITY_THRESHOLD against existing
+     embeddings) — rows with the SAME source_uri as the incoming document are
+     excluded here: same-uri versions are handled by leg 1, and a new version
+     must never be dropped as a semantic duplicate.
 
 Never overwrites existing rows — on duplicate, returns the existing id.
 """
@@ -21,7 +24,7 @@ import re
 
 import numpy as np
 
-from .db import get_connection
+from .db import as_numpy, get_connection
 from .embed import embed_text
 
 SIMILARITY_THRESHOLD = 0.95
@@ -107,14 +110,41 @@ def find_duplicate(
         """
         SELECT id, embedding FROM knowledge_items
         WHERE embedding IS NOT NULL
+          AND (%s::text IS NULL OR source_uri IS DISTINCT FROM %s::text)
         ORDER BY embedding <=> %s::vector LIMIT 5
         """,
-        (q_emb.tolist(),),
+        (source_uri, source_uri, q_emb.tolist()),
     ).fetchall()
     for row in rows:
-        existing = np.array(row["embedding"], dtype=np.float32)
+        existing = as_numpy(row["embedding"])
         sim = float(np.dot(q_emb, existing) / (np.linalg.norm(q_emb) * np.linalg.norm(existing) + 1e-9))
         if sim >= SIMILARITY_THRESHOLD:
             return row["id"]
 
     return None
+
+
+def find_version_predecessors(
+    source_uri: str | None,
+    document_hash: str | None,
+    conn,
+) -> list[str]:
+    """Ids of earlier document versions of the same source_uri.
+
+    Document-level rows (metadata.document_hash NOT NULL) that share
+    source_uri but carry a DIFFERENT document_hash than the incoming one.
+    Used to link a newly ingested version to the versions it supersedes.
+    Read-only. Returns [] when source_uri or document_hash is missing.
+    """
+    if not source_uri or not document_hash:
+        return []
+    rows = conn.execute(
+        """
+        SELECT id FROM knowledge_items
+        WHERE source_uri = %s
+          AND metadata->>'document_hash' IS NOT NULL
+          AND metadata->>'document_hash' IS DISTINCT FROM %s
+        """,
+        (source_uri, document_hash),
+    ).fetchall()
+    return [row["id"] for row in rows]

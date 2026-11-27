@@ -114,12 +114,21 @@ def _config() -> tuple[str, str, str | None]:
 
     The caller (pipeline/ingest.py) checks the EXTRACT_ENABLED gate first;
     reaching this function without EXTRACT_API_URL/EXTRACT_MODEL is a
-    configuration error and must fail cleanly.
+    configuration error and must fail cleanly. EXTRACT_API_URL must use an
+    http(s) scheme (same check as VISION_API_URL in pipeline/extractors.py) —
+    anything else (file:, ftp:, a bare host, ...) is refused here.
     """
+    from urllib.parse import urlsplit
+
     api_url = (os.environ.get("EXTRACT_API_URL") or "").strip()
     model = (os.environ.get("EXTRACT_MODEL") or "").strip()
     if not api_url or not model:
         raise RuntimeError("extraction not configured")
+    scheme = urlsplit(api_url).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise RuntimeError(
+            f"EXTRACT_API_URL must use an http(s) scheme, got {scheme!r}"
+        )
     api_key = (os.environ.get("EXTRACT_API_KEY") or "").strip()
     return api_url, model, (api_key or None)
 

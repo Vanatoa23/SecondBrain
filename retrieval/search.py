@@ -15,11 +15,13 @@ from pipeline.embed import embed_text  # reuse the same bge-m3 embedder (run fro
 from .db import get_connection
 from .fts import fts_search
 from .graph import graph_expand, page_rank_expand
-from .merge import STALENESS_PENALTY, merge_results
+from .merge import REVIEW_STATUS_PENALTY, STALENESS_PENALTY, merge_results
 from .rerank import rerank
 from .vector_search import vector_search
 
 ALL_METHODS = ("vector", "fts", "graph")
+
+REVIEW_PENALTY = REVIEW_STATUS_PENALTY  # 0.5 when review_status startswith "invalidated"
 
 # Graph ranking modes: "expand" = hop-decay scoring (graph_expand, the v1
 # behavior), "pagerank" = personalized PageRank over the h-hop subgraph
@@ -99,12 +101,17 @@ def search(
     if ranking == "auto":
         ranking = "pagerank" if hops > 1 else "expand"
 
-    query_emb = embed_text(query)
+    # Embed the query only when a method needs it: vector search uses it
+    # directly and graph seeds come from the vector result. A pure FTS query
+    # never loads the bge-m3 embedder.
+    query_emb = None
+    if "vector" in methods or "graph" in methods:
+        query_emb = embed_text(query)
 
     # Each method runs on its OWN connection inside the thread pool — psycopg
     # connections serialize their own wire protocol, so separate connections
     # make the three queries genuinely parallel.
-    def run_vector():
+    def run_vector(query_emb):
         with get_connection() as conn:
             return vector_search(conn, query_emb, top_k=candidate_k)
 
@@ -112,7 +119,7 @@ def search(
         with get_connection() as conn:
             return fts_search(conn, query, top_k=candidate_k)
 
-    def run_graph(vector_future=None):
+    def run_graph(query_emb, vector_future=None):
         if vector_future is not None:
             # Reuse the vector result as graph seeds (no re-query).
             seeds = vector_future.result()[:5]
@@ -128,22 +135,29 @@ def search(
     with ThreadPoolExecutor(max_workers=len(methods)) as pool:
         futures = {}
         if "vector" in methods:
-            futures["vector"] = pool.submit(run_vector)
+            futures["vector"] = pool.submit(run_vector, query_emb)
         if "fts" in methods:
             futures["fts"] = pool.submit(run_fts)
         if "graph" in methods:
-            futures["graph"] = pool.submit(run_graph, futures.get("vector"))
+            futures["graph"] = pool.submit(run_graph, query_emb, futures.get("vector"))
         by_method: dict[str, list[dict]] = {m: futures[m].result() for m in methods}
 
     merged = merge_results(by_method)
     ranked = rerank(query, merged)  # score ALL merged candidates
 
-    # Final ranking: rerank score with the staleness penalty applied, so a
-    # stale item can no longer outrank a fresh one on rerank score alone.
-    # The stale flag and the penalized final score stay on each result.
+    # Final ranking: rerank score with the staleness penalty and the
+    # review-status penalty applied, so a stale or invalidated item can no
+    # longer outrank a fresh one on rerank score alone. The stale /
+    # review_status flags and the penalized final score stay on each result;
+    # nothing is ever filtered out here.
     for r in ranked:
         penalty = STALENESS_PENALTY if r.get("stale") else 1.0
-        r["final_score"] = r["rerank_score"] * penalty
+        review_status = r.get("review_status") or ""
+        if not isinstance(review_status, str):
+            review_status = ""
+        review_penalty = REVIEW_PENALTY if review_status.startswith("invalidated") else 1.0
+        r["review_status"] = review_status
+        r["final_score"] = r["rerank_score"] * penalty * review_penalty
     ranked = sorted(ranked, key=lambda x: x["final_score"], reverse=True)[:top_k]
 
     results = _apply_token_budget(ranked, token_budget)

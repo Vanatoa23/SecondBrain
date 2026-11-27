@@ -24,9 +24,9 @@ import sys
 import numpy as np
 
 from .chunk import chunk_text
-from .db import get_connection
-from .dedup import content_hash, find_duplicate
-from .embed import embed_texts
+from .db import as_numpy, get_connection
+from .dedup import content_hash, find_duplicate, find_version_predecessors
+from .embed import embed_text, embed_texts
 from .extractors import extract
 from .raw_store import store_raw_bytes
 
@@ -64,27 +64,40 @@ def estimate_distillation_score(source_type: str) -> float:
 _RELATIONSHIP_TYPES = ("associative", "problem-solution", "cause-effect", "related")
 
 
-def auto_link(node_id: str, text: str, conn, top_candidates: int = 10) -> list[str]:
+def auto_link(node_id: str, text: str, conn, top_candidates: int = 10,
+              q_emb=None, source_uri: str | None = None) -> list[str]:
     """Find existing nodes semantically similar to the new node and create links.
 
+    Args:
+        q_emb: optional precomputed embedding of `text` (ingest passes the
+            chunk's own embedding from embed_texts(chunks), avoiding a second
+            embed per node). Computed from `text` when not given.
+        source_uri: the new node's source_uri. Candidates sharing it are
+            excluded — siblings of the same document must not be linked to
+            each other.
+
     Returns list of created relationship ids. INSERT-only on relationships
-    (ON CONFLICT DO NOTHING due to UNIQUE(from_id, to_id, type)).
+    (ON CONFLICT DO NOTHING due to UNIQUE(from_id, to_id, type)). A link is
+    only created when NEITHER direction of the (from, to, type) edge exists
+    yet — no duplicate reverse edges.
     """
-    q_emb = embed_texts([text])[0]
+    if q_emb is None:
+        q_emb = embed_texts([text])[0]
     # Single query: candidate rows come back WITH their embedding, so the loop
     # below never re-SELECTs per candidate (was an N+1).
     candidates = conn.execute(
         """
         SELECT id, content, embedding FROM knowledge_items
         WHERE id != %s AND embedding IS NOT NULL
+          AND (source_uri IS NULL OR source_uri IS DISTINCT FROM %s::text)
         ORDER BY embedding <=> %s::vector LIMIT %s
         """,
-        (node_id, q_emb.tolist(), top_candidates),
+        (node_id, source_uri, q_emb.tolist(), top_candidates),
     ).fetchall()
 
     created: list[str] = []
     for cand in candidates:
-        cand_emb = np.array(cand["embedding"], dtype=np.float32)
+        cand_emb = as_numpy(cand["embedding"])
         sim = float(
             np.dot(q_emb, cand_emb)
             / (np.linalg.norm(q_emb) * np.linalg.norm(cand_emb) + 1e-9)
@@ -93,6 +106,19 @@ def auto_link(node_id: str, text: str, conn, top_candidates: int = 10) -> list[s
             continue
         strength = round(min(sim, 1.0), 4)
         rel_type = "associative"  # default; LLM would classify more precisely
+        # Skip when either direction of the edge already exists — never create
+        # both (A, B) and (B, A).
+        existing = conn.execute(
+            """
+            SELECT from_id, to_id FROM relationships
+            WHERE type = %s
+              AND ((from_id = %s AND to_id = %s)
+                OR (from_id = %s AND to_id = %s))
+            """,
+            (rel_type, node_id, cand["id"], cand["id"], node_id),
+        ).fetchall()
+        if existing:
+            continue
         row = conn.execute(
             """
             INSERT INTO relationships (from_id, to_id, type, strength, direction, context)
@@ -116,15 +142,19 @@ def auto_link(node_id: str, text: str, conn, top_candidates: int = 10) -> list[s
 _EXTRACT_SOURCE_TYPES = ("text", "url", "pdf", "youtube", "audio", "github")
 
 
-def _store_extracted_knowledge(conn, knowledge: dict, source_uri: str | None) -> dict:
+def _store_extracted_knowledge(conn, knowledge: dict, source_uri: str | None,
+                               doc_id: str | None = None) -> dict:
     """Store validated LLM extraction results. INSERT-ONLY, all parameterized.
 
     * One knowledge_items row per unique entity name, addressed by
       source_uri = "entity://<slug>" (slug = [a-z0-9-]). An existing row with
-      that source_uri is reused (SELECT first), never updated.
+      that source_uri is reused (SELECT first), never updated. New entity
+      rows carry an embedding of "name (type)" so they are retrievable.
     * One relationships row per relation with strength = confidence,
       direction 'one_way', context 'llm-extracted', ON CONFLICT (from_id,
       to_id, type) DO NOTHING (schema UNIQUE constraint).
+    * One 'extracted_from' edge from the source document node (doc_id) to
+      each entity: direction 'one_way', strength 1.0, ON CONFLICT DO NOTHING.
     """
     from . import extract as _llm_extract  # lazy — the module the caller patches
 
@@ -157,14 +187,15 @@ def _store_extracted_knowledge(conn, knowledge: dict, source_uri: str | None) ->
                 # transaction. (The %% is psycopg placeholder escaping for
                 # the literal % in the LIKE pattern.)
                 etype = ent.get("type", "entity")
+                emb = embed_text(f"{name} ({etype})")
                 conn.execute("SAVEPOINT entity_upsert")
                 try:
                     row = conn.execute(
                         """
                         INSERT INTO knowledge_items
                             (type, title, content, mime_type, source_uri,
-                             distillation_score, update_period, metadata)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                             distillation_score, embedding, update_period, metadata)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s::vector, %s, %s::jsonb)
                         ON CONFLICT (source_uri) WHERE source_uri LIKE 'entity://%%'
                         DO NOTHING
                         RETURNING id
@@ -173,7 +204,7 @@ def _store_extracted_knowledge(conn, knowledge: dict, source_uri: str | None) ->
                             "entity", name,
                             f"Entity: {name} (type {etype}) extracted from {source_uri}",
                             "text/plain", uri,
-                            0.1, -1,
+                            0.1, emb.tolist(), -1,
                             json.dumps({
                                 "extraction": "llm",
                                 "entity_type": etype,
@@ -203,6 +234,19 @@ def _store_extracted_knowledge(conn, knowledge: dict, source_uri: str | None) ->
             slug_to_id[slug] = entity_id
         name_to_id[name] = entity_id
 
+    # Provenance: an 'extracted_from' edge from the source document node to
+    # each entity, so extraction results trace back to their document.
+    if doc_id is not None:
+        for entity_id in name_to_id.values():
+            conn.execute(
+                """
+                INSERT INTO relationships (from_id, to_id, type, strength, direction, context)
+                VALUES (%s, %s, 'extracted_from', 1.0, 'one_way', %s)
+                ON CONFLICT (from_id, to_id, type) DO NOTHING
+                """,
+                (doc_id, entity_id, f"llm-extracted from {source_uri}"),
+            )
+
     rel_count = 0
     for rel in knowledge.get("relations", []):
         from_id = name_to_id.get(rel["from"])
@@ -226,7 +270,8 @@ def _store_extracted_knowledge(conn, knowledge: dict, source_uri: str | None) ->
     return {"entities": len(name_to_id), "relations": rel_count}
 
 
-def _run_llm_extraction(text: str, source_uri: str | None, conn) -> dict:
+def _run_llm_extraction(text: str, source_uri: str | None, conn,
+                        doc_id: str | None = None) -> dict:
     """Env-gated Phase 3 hook body: extract entities/relations and store them.
 
     pipeline.extract is imported lazily so the default pipeline (extraction
@@ -237,7 +282,7 @@ def _run_llm_extraction(text: str, source_uri: str | None, conn) -> dict:
     from . import extract as _llm_extract
     try:
         knowledge = _llm_extract.extract_knowledge(text)
-        return _store_extracted_knowledge(conn, knowledge, source_uri)
+        return _store_extracted_knowledge(conn, knowledge, source_uri, doc_id)
     except Exception as exc:
         detail = _llm_extract._sanitize(f"{type(exc).__name__}: {exc}")
         print(f"[ingest] llm extraction failed (ignored): {detail}", file=sys.stderr)
@@ -249,7 +294,8 @@ def _run_llm_extraction(text: str, source_uri: str | None, conn) -> dict:
 # ---------------------------------------------------------------------------
 
 def ingest(source_type: str, payload: str | bytes, source_uri: str | None = None,
-           title: str | None = None, store_raw: bool = False) -> dict:
+           title: str | None = None, store_raw: bool = False,
+           distillation_override: float | None = None) -> dict:
     """Ingest raw content into the knowledge base.
 
     Args:
@@ -259,6 +305,8 @@ def ingest(source_type: str, payload: str | bytes, source_uri: str | None = None
             If no source_uri was given, the node's source_uri becomes
             "raw://<sha256>". The pipeline stays insert-only and dedup still
             runs on the extracted text (plus source_uri) first.
+        distillation_override: when set (and within 0..1), used instead of
+            estimate_distillation_score(source_type) for the inserted rows.
 
     Returns a dict with keys: status ('inserted' | 'duplicate' | 'empty'),
     node_ids, relationship_ids, chunks — plus raw_sha256 when store_raw=True.
@@ -303,7 +351,10 @@ def ingest(source_type: str, payload: str | bytes, source_uri: str | None = None
         chunks = chunk_text(text)
         embeddings = embed_texts(chunks)
         update_period = estimate_update_period(text, result.mime_type)
-        distill = estimate_distillation_score(source_type)
+        if distillation_override is not None and 0.0 <= distillation_override <= 1.0:
+            distill = float(distillation_override)
+        else:
+            distill = estimate_distillation_score(source_type)
 
         # If single chunk → one node. If multiple → first chunk is the document
         # node, rest are excerpts pointing to it.
@@ -339,29 +390,45 @@ def ingest(source_type: str, payload: str | bytes, source_uri: str | None = None
             if doc_id is None:
                 doc_id = nid
 
-        # Auto-link every new node to existing knowledge
-        rel_ids: list[str] = []
-        for nid, chunk in zip(node_ids, chunks):
-            rel_ids.extend(auto_link(nid, chunk, conn))
+        # New version of an existing source_uri: link the new document node to
+        # every earlier version it supersedes (append-only — nothing updated).
+        for pred_id in find_version_predecessors(result.source_uri, doc_hash, conn):
+            conn.execute(
+                """
+                INSERT INTO relationships (from_id, to_id, type, direction, context)
+                VALUES (%s, %s, 'supersedes', 'one_way', %s)
+                ON CONFLICT (from_id, to_id, type) DO NOTHING
+                """,
+                (doc_id, pred_id, f"new version of {result.source_uri}"),
+            )
 
-        # Phase 3 hook (env-gated, optional): LLM entity/relation extraction
-        # at the END of a successful insert. Extraction must never break
-        # ingestion — any failure is logged to stderr and swallowed here.
-        if os.environ.get("EXTRACT_ENABLED") == "1" and source_type in _EXTRACT_SOURCE_TYPES:
+        # Auto-link every new node to existing knowledge. Each node reuses its
+        # own chunk embedding (q_emb) — no extra embed per node.
+        rel_ids: list[str] = []
+        for nid, chunk, emb in zip(node_ids, chunks, embeddings):
+            rel_ids.extend(auto_link(nid, chunk, conn, q_emb=emb,
+                                     source_uri=result.source_uri))
+
+    # Phase 3 hook (env-gated, optional): LLM entity/relation extraction runs
+    # AFTER the insert transaction above has committed, on a SECOND short
+    # connection — extraction must never break (or roll back) ingestion.
+    # Any failure is sanitized and swallowed here.
+    if os.environ.get("EXTRACT_ENABLED") == "1" and source_type in _EXTRACT_SOURCE_TYPES:
+        try:
+            with get_connection() as conn:
+                extraction = _run_llm_extraction(text, result.source_uri, conn, doc_id)
+        except Exception as exc:
+            # Defense in depth: _run_llm_extraction already sanitizes, but
+            # this outer catch must NEVER print raw exception text — it may
+            # embed EXTRACT_API_KEY / Authorization material. Pass it
+            # through pipeline.extract._sanitize before printing (reviewer LOW).
             try:
-                extraction = _run_llm_extraction(text, result.source_uri, conn)
-            except Exception as exc:
-                # Defense in depth: _run_llm_extraction already sanitizes, but
-                # this outer catch must NEVER print raw exception text — it may
-                # embed EXTRACT_API_KEY / Authorization material. Pass it
-                # through pipeline.extract._sanitize before printing (reviewer LOW).
-                try:
-                    from . import extract as _llm_extract_mod
-                    detail = _llm_extract_mod._sanitize(f"{type(exc).__name__}: {exc}")
-                except Exception:
-                    detail = type(exc).__name__  # _sanitize itself failed — leak nothing
-                print(f"[ingest] llm extraction hook failed (ignored): {detail}",
-                      file=sys.stderr)
+                from . import extract as _llm_extract_mod
+                detail = _llm_extract_mod._sanitize(f"{type(exc).__name__}: {exc}")
+            except Exception:
+                detail = type(exc).__name__  # _sanitize itself failed — leak nothing
+            print(f"[ingest] llm extraction hook failed (ignored): {detail}",
+                  file=sys.stderr)
 
     out = {
         "status": "inserted",

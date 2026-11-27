@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 STALENESS_PENALTY = 0.5  # stale items keep 50% of their score — never hard-filtered
+REVIEW_STATUS_PENALTY = 0.5  # review_status "invalidated..." keeps 50% — never hard-filtered
 
 
 def is_stale(node: dict, now: datetime | None = None) -> bool:
@@ -29,7 +30,8 @@ def merge_results(
     """Merge per-method result lists into one deduplicated, scored list.
 
     Score combination: max score across methods (a node found by both vector
-    and FTS keeps its best score), then staleness penalty applied.
+    and FTS keeps its best score), then staleness and review-status penalties
+    applied (soft penalties only — nothing is ever filtered out).
     """
     merged: dict[str, dict] = {}
     for method, results in by_method.items():
@@ -51,6 +53,13 @@ def merge_results(
             entry["stale"] = True
         else:
             entry["stale"] = False
+        meta = entry.get("metadata")
+        review_status = meta.get("review_status") if isinstance(meta, dict) else ""
+        if not isinstance(review_status, str):
+            review_status = ""  # non-string jsonb value must not crash startswith
+        entry["review_status"] = review_status
+        if review_status.startswith("invalidated"):
+            entry["score"] *= REVIEW_STATUS_PENALTY
         entry["found_by"] = sorted(entry["found_by"])
 
     return sorted(merged.values(), key=lambda x: x["score"], reverse=True)
