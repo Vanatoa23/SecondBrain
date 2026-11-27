@@ -353,7 +353,11 @@ def test_sanitize_strips_all_secret_forms():
     assert "abc.def-123" not in out, out
     assert "Bearer" not in out and "bearer <redacted>" in out, out
     assert "Authorization: <redacted>" in out, out
-    assert "api_key=<redacted>" in out and "other=1" in out, out
+    # F-B (audit-B F2/A4): the WHOLE URL query string / fragment is redacted
+    # (bridge-fix pattern), not just the api_key value — no query secret can
+    # survive in error text.
+    assert "https://x.test/v1?<redacted>" in out, out
+    assert "api_key" not in out and "other=1" not in out, out
 
 
 # --- github blob sha validation (audit-E/F LOW) ------------------------------
