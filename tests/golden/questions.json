@@ -1,0 +1,194 @@
+[
+  {
+    "query": "How much advance warning does the aurora-7 satellite constellation give before a solar storm reaches Earth?",
+    "expected_source_uri": "golden://doc-01",
+    "note": "doc-01 (aurora-7) states 40-60 minutes of warning; 52 minutes during the March 2044 storm."
+  },
+  {
+    "query": "How does the quasar-12 rover collect polymetallic nodules without vacuuming and destroying the seafloor sediment?",
+    "expected_source_uri": "golden://doc-02",
+    "note": "doc-02 (quasar-12) uses gentle robotic fingers to pick individual nodules."
+  },
+  {
+    "query": "How much less water does the nimbus-4 rooftop vertical farm use compared to a field farm growing the same crops?",
+    "expected_source_uri": "golden://doc-03",
+    "note": "doc-03 (nimbus-4) uses about 95 percent less water via rainwater and hydroponics."
+  },
+  {
+    "query": "How long can the zephyr-9 hand-crank emergency radio play after one minute of cranking?",
+    "expected_source_uri": "golden://doc-04",
+    "note": "doc-04 (zephyr-9): one minute of cranking gives about 45 minutes of listening."
+  },
+  {
+    "query": "What did the tundra-2 station record about permafrost thaw during the summer of 2047?",
+    "expected_source_uri": "golden://doc-05",
+    "note": "doc-05 (tundra-2): the active layer deepened by 11 centimeters in a single summer."
+  },
+  {
+    "query": "How much firewood does the cinder-8 brick kiln save by recovering waste heat from its chimney?",
+    "expected_source_uri": "golden://doc-06",
+    "note": "doc-06 (cinder-8): the flue heat exchanger cuts wood consumption by about 40 percent."
+  },
+  {
+    "query": "Why can the harbor-5 tidal microgrid schedule its electricity generation years in advance, unlike solar or wind?",
+    "expected_source_uri": "golden://doc-07",
+    "note": "doc-07 (harbor-5): tides are completely predictable; Bay of Fundy turbines spin both ways."
+  },
+  {
+    "query": "What insulation R-value does one inch of a moss-6 mycelium panel achieve?",
+    "expected_source_uri": "golden://doc-08",
+    "note": "doc-08 (moss-6): R-value of about 3.5 per inch, comparable to fiberglass."
+  },
+  {
+    "query": "How many tons of plastic did the drift-11 barge fleet collect from the North Pacific gyre in 2047?",
+    "expected_source_uri": "golden://doc-09",
+    "note": "doc-09 (drift-11): 8400 tons collected in 2047, about a third of it fishing gear."
+  },
+  {
+    "query": "How thick are the 3D-printed regolith walls of the granite-14 lunar habitat, and what do they protect against?",
+    "expected_source_uri": "golden://doc-13",
+    "note": "doc-13 (granite-14): walls are three meters thick, shielding against radiation and micrometeorites."
+  },
+  {
+    "query": "What does the forge-3 community workshop run once a month where neighbors bring broken tools and furniture for free mending?",
+    "expected_source_uri": "golden://doc-10",
+    "note": "doc-10 (forge-3): the monthly repair cafe."
+  },
+  {
+    "query": "How much does a lumen-10 fiber-optic daylighting kit cost, and how far into a building can it carry real sunlight?",
+    "expected_source_uri": "golden://doc-11",
+    "note": "doc-11 (lumen-10): about 200 dollars, up to 30 meters."
+  },
+  {
+    "query": "How many heirloom chili varieties does the pepper-7 seed bank preserve, and at what temperature are the seeds stored?",
+    "expected_source_uri": "golden://doc-12",
+    "note": "doc-12 (pepper-7): 1300 varieties at minus 20 degrees Celsius."
+  },
+  {
+    "query": "What does the willow-6 constructed wetland use to treat village greywater, and what did it cost to build compared to a conventional plant?",
+    "expected_source_uri": "golden://doc-14",
+    "note": "doc-14 (willow-6): plants, gravel and gravity; the cost of one year of conventional maintenance."
+  },
+  {
+    "query": "How many fires did the ember-2 lookout towers report last season, and how large did the biggest one get?",
+    "expected_source_uri": "golden://doc-15",
+    "note": "doc-15 (ember-2): 340 fires, all contained before 10 hectares."
+  },
+  {
+    "query": "How many candidate small planets did the vantage-8 transit survey detect, and how many of them orbit in the habitable zone?",
+    "expected_source_uri": "pdf://papers/vantage8-transit-survey.pdf",
+    "note": "doc-16 (vantage-8, pdf): 212 candidates, 31 in the habitable zone."
+  },
+  {
+    "query": "How far in advance does the sonar-5 model forecast mass coral spawning on the reef, and what was its accuracy in 2047?",
+    "expected_source_uri": "audio://recordings/sonar5-lecture.mp3",
+    "note": "doc-17 (sonar-5, audio transcript): up to five days ahead, 95 percent accuracy (36 of 38 forecasts)."
+  },
+  {
+    "query": "According to the fjord-4 video, what shape does a glacier cut into a valley, and how deep is the deepest fjord?",
+    "expected_source_uri": "youtube://watch?v=fjord4video",
+    "note": "doc-18 (fjord-4, youtube transcript): a U-shape; Skelton Inlet reaches 1900 meters."
+  },
+  {
+    "query": "What does the rivet-9 command-line tool do, how many tool categories does it recognize, and under which license is it released?",
+    "expected_source_uri": "github://octo/rivet-9/blob/main/README.md",
+    "note": "doc-19 (rivet-9, github file): tally sheets to CSV, 14 categories, MIT license."
+  },
+  {
+    "query": "What hull features let a single person drag a coble-3 fishing boat through the surf?",
+    "expected_source_uri": "golden://doc-20",
+    "note": "doc-20 (coble-3): shallow flat midsection and high flaring ends."
+  },
+  {
+    "query": "How tall is the lantern-6 Fresnel lens, how often does its beam flash, and how far out to sea is it visible in clear weather?",
+    "expected_source_uri": "golden://doc-21",
+    "note": "doc-21 (lantern-6): 3.5 meters, flash every 10 seconds, visible 40 km."
+  },
+  {
+    "query": "How many hectares of floodplain did the delta-8 levee setback reconnect to the River Alder, and by how much did it lower flood peaks in Alder?",
+    "expected_source_uri": "golden://doc-22",
+    "note": "doc-22 (delta-8): 900 hectares, flood peaks down 35 centimeters."
+  },
+  {
+    "query": "What does the spindle-5 carding machine turn raw sheep fleece into, and how much does it process per hour?",
+    "expected_source_uri": "golden://doc-23",
+    "note": "doc-23 (spindle-5): sliver, about 30 kilograms an hour."
+  },
+  {
+    "query": "In 2047, how many kestrel-4 nest boxes were in the network and what share of them were occupied by breeding pairs?",
+    "expected_source_uri": "golden://doc-24",
+    "note": "doc-24 (kestrel-4): 1200 boxes, 61 percent occupied."
+  },
+  {
+    "query": "How many heritage apple varieties does orchard-9 preserve by grafting, and which grafting technique does it use?",
+    "expected_source_uri": "golden://doc-25",
+    "note": "doc-25 (orchard-9): 90 varieties, whip-and-tongue grafting."
+  },
+  {
+    "query": "How fast could a warning travel the whole beacon-3 hilltop chain, and how many beacons does it have?",
+    "expected_source_uri": "golden://doc-26",
+    "note": "doc-26 (beacon-3): under an hour across 200 km, twelve beacons."
+  },
+  {
+    "query": "How long is the thicket-7 hedgerow wildlife corridor, and which animal has been recorded in it for the first time in fifty years?",
+    "expected_source_uri": "golden://doc-27",
+    "note": "doc-27 (thicket-7): 40 km of hedgerows; dormice returned."
+  },
+  {
+    "query": "How many kilometers of salmon spawning habitat did removing the plum-2 dam reopen, and how tall was the dam?",
+    "expected_source_uri": "golden://doc-28",
+    "note": "doc-28 (plum-2): 60 km reopened; the dam was 14 meters high."
+  },
+  {
+    "query": "At what wind speed did the anchor-6 storm mooring hold a 10-meter boat in North Sea tests, and how heavy is its anchor?",
+    "expected_source_uri": "golden://doc-29",
+    "note": "doc-29 (anchor-6): held in 60-knot winds; 25-kilogram anchor."
+  },
+  {
+    "query": "At what depth and temperature does the vault-4 underground archive keep its paper records?",
+    "expected_source_uri": "golden://doc-30",
+    "note": "doc-30 (vault-4): 300 meters deep in a salt mine, constant 8 degrees Celsius."
+  },
+  {
+    "query": "How do I run the collim-5qp2w procedure on my amateur Newtonian: centering the secondary under the focuser, turning the primary tilt screws, and watching a defocused star until the diffraction rings look concentric?",
+    "expected_source_uri": "golden://mh-3",
+    "note": "chain1 end (golden://mh-1 -> mh-2 -> mh-3, 2 hops). Query uses ONLY mh-1 (collim-5qp2w telescope) vocabulary, so vector-only misses the apiary-6tn4c end doc; graph hops=2 must traverse mh-1 -> mh-2 -> mh-3.",
+    "min_hops": 2,
+    "require_graph": true
+  },
+  {
+    "query": "In the collim-5qp2w routine, which screws on the primary cell do I adjust, and what exactly am I looking at in the eyepiece while I do it?",
+    "expected_source_uri": "golden://mh-3",
+    "note": "chain1 end (mh-1 -> mh-2 -> mh-3). collim-5qp2w vocabulary only; expected doc is the chain end golden://mh-3.",
+    "min_hops": 2,
+    "require_graph": true
+  },
+  {
+    "query": "Why does the collim-5qp2w method have me iterate on a defocused star instead of a focused one, and when do I repeat the whole procedure?",
+    "expected_source_uri": "golden://mh-3",
+    "note": "chain1 end (mh-1 -> mh-2 -> mh-3). collim-5qp2w vocabulary only; expected doc is the chain end golden://mh-3.",
+    "min_hops": 2,
+    "require_graph": true
+  },
+  {
+    "query": "How often do I calibrate the salinity-2vk7r refractometer, against which reference solution and at what temperature?",
+    "expected_source_uri": "golden://mh-6",
+    "note": "chain2 end (golden://mh-4 -> mh-5 -> mh-6, 2 hops). Query uses ONLY mh-4 (salinity-2vk7r reef tank) vocabulary, so vector-only misses the radar-7tn4c end doc; graph hops=2 must traverse mh-4 -> mh-5 -> mh-6.",
+    "min_hops": 2,
+    "require_graph": true
+  },
+  {
+    "query": "What does the salinity-2vk7r routine say about topping up evaporation in the reef tank, and why keep salinity within half a ppt of the target?",
+    "expected_source_uri": "golden://mh-6",
+    "note": "chain2 end (mh-4 -> mh-5 -> mh-6). salinity-2vk7r vocabulary only; expected doc is the chain end golden://mh-6.",
+    "min_hops": 2,
+    "require_graph": true
+  },
+  {
+    "query": "Why does the salinity-2vk7r method insist on RODI water only for top-ups and a monthly calibration, and where do I record the readings?",
+    "expected_source_uri": "golden://mh-6",
+    "note": "chain2 end (mh-4 -> mh-5 -> mh-6). salinity-2vk7r vocabulary only; expected doc is the chain end golden://mh-6.",
+    "min_hops": 2,
+    "require_graph": true
+  }
+]

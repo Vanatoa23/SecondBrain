@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Database
+*.sqlite
+*.db
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local config (keep .env.example)
+.env
+*.local
+
+# Build outputs
+target/
+build/
+
+# Test coverage
+coverage/
+
+# Data directories (add to git if you want to version control sample data)
+data/
+raw/
+
+# Backups — pg_dump output must never be committed
+backups/
+
+# Personal notes stay local
+notes/*.md
+!notes/.gitkeep
+
+# Phase 4 curator runtime artifacts (never committed)
+review_queue.json

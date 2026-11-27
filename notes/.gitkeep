@@ -1,0 +1,5 @@
+This directory is the default Markdown notes vault for scripts/sync_notes.py.
+
+Only this .gitkeep file is tracked in git. Real notes placed here stay local
+by convention — add "notes/" to your global git excludes (e.g.
+core.excludesFile) so your vault is never committed.

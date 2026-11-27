@@ -1,0 +1,17 @@
+{
+  "name": "secondbrain-dropbox",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local-only insert/retrieve web UI for Second Brain. Shells out to the Python bridge CLI (python -m bridge) — all SQL and ML stay in Python.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
