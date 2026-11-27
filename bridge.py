@@ -351,7 +351,7 @@ def _audit_bridge_write_error(command: str, args: dict, exc: BaseException) -> N
     The error text carries the exception type name and goes through
     _sanitize_error, so no secret/URL material leaks into the audit log.
     """
-    if command in MUTATING_COMMANDS:
+    if command in MUTATING_COMMANDS or (command == "curator" and not bool(args.get("dry_run"))):
         _audit_bridge_write(command, args, outcome="error",
                             error=_sanitize_error(f"{type(exc).__name__}: {exc}"))
 
@@ -868,6 +868,8 @@ def cmd_curator(args: dict) -> dict:
             # The optional curator script must never break the report itself.
             result["curator_error"] = _sanitize_error(f"{type(e).__name__}: {e}")
 
+    if not dry_run:
+        _audit_bridge_write("curator", args)
     return result
 
 
@@ -892,16 +894,21 @@ def cmd_review_decision(args: dict) -> dict:
     "id" may be either:
       * a uuid — the repo-root review_queue.json entry keyed by (id, reason)
         gets status=decision and updated_at=now AND the DB row is updated
-        (see below); or
+        (see below, EXCEPT for reason="flagged-issue" which is queue-only so
+        dismissing/approving an agent flag never alters contradiction
+        review_status); or
       * a non-uuid id (e.g. one of the 16-hex flag-queue ids from flag_issue)
         — a QUEUE-ONLY decision: only the queue file is updated, the DB is
         never touched (db_updated is 0).
 
-    Queue: the file is written to a tmp file and os.replace'd into place.
-    ValueError on a missing/unreadable queue, no matching entry, or bad input.
+    Queue: load -> DB update -> mutate -> atomic write runs under
+    audit.locked_json_update (exclusive lockfile + unique tmp + fsync + 0600 +
+    os.replace), so concurrent curator and review_decision writers cannot race
+    or clobber each other. ValueError on a missing/unreadable queue, no
+    matching entry, or bad input.
 
-    DB (uuid ids only; the only sanctioned non-insert write besides the
-    curator merge — all parameterized):
+    DB (uuid ids with reason != "flagged-issue"; the only sanctioned non-insert
+    write besides the curator merge — all parameterized):
       "dismissed" -> UPDATE knowledge_items SET metadata = metadata -
                      'review_status' WHERE id = %s
       "approved"  -> only when (metadata->>'review_status') LIKE 'invalidated%':
@@ -924,65 +931,66 @@ def cmd_review_decision(args: dict) -> dict:
         item_id = None  # non-uuid id (e.g. a 16-hex flag id) -> QUEUE-ONLY decision
     id_str = str(item_id) if item_id is not None else raw_id
 
-    # --- queue file (atomic tmp + os.replace) ---
+    # --- locked queue read -> DB update -> atomic write ---
     queue_path = _review_queue_path()
     if not os.path.isfile(queue_path):
         raise ValueError(f"review queue not found: {queue_path}")
+
+    def _mutate(queue):
+        if not isinstance(queue, dict) or not isinstance(queue.get("flagged"), list):
+            raise ValueError(
+                f"review queue {queue_path} has an unexpected shape "
+                '(expected {"updated_at": ..., "flagged": [...]})'
+            )
+        entry = None
+        for e in queue["flagged"]:
+            if (isinstance(e, dict)
+                    and str(e.get("id")) == id_str
+                    and str(e.get("reason")) == reason):
+                entry = e
+                break
+        if entry is None:
+            raise ValueError(
+                f"no review queue entry in {queue_path} for id={id_str} reason={reason!r}"
+            )
+        # --- DB (metadata-only jsonb write, parameterized) ---
+        # Commit the DB update BEFORE replacing review_queue.json so a DB error
+        # never leaves the queue file mutated out of sync with the database.
+        # Non-uuid ids and reason="flagged-issue" are queue-only decisions:
+        # the DB is never touched.
+        db_updated = 0
+        if item_id is not None and reason != "flagged-issue":
+            from pipeline.db import get_connection
+
+            with get_connection() as conn:
+                if decision == "dismissed":
+                    cur = conn.execute(
+                        "UPDATE knowledge_items SET metadata = metadata - 'review_status' WHERE id = %s",
+                        (item_id,),
+                    )
+                else:  # approved — only an existing invalidated* marker is rewritten
+                    # (%% is psycopg placeholder escaping for the literal % in LIKE)
+                    cur = conn.execute(
+                        """
+                        UPDATE knowledge_items
+                        SET metadata = metadata || '{"review_status": "invalidated-approved"}'::jsonb
+                        WHERE id = %s AND (metadata->>'review_status') LIKE 'invalidated%%'
+                        """,
+                        (item_id,),
+                    )
+                db_updated = cur.rowcount if getattr(cur, "rowcount", None) is not None else 0
+
+        now = datetime.now(timezone.utc).isoformat()
+        entry["status"] = decision
+        entry["updated_at"] = now
+        queue["updated_at"] = now
+        return int(db_updated)
+
     try:
-        with open(queue_path, encoding="utf-8") as fh:
-            queue = json.load(fh)
-    except (json.JSONDecodeError, OSError) as e:
+        with audit.locked_json_update(queue_path, _mutate, lambda: {}) as db_updated:
+            pass
+    except RuntimeError as e:
         raise ValueError(f"review queue {queue_path} is not readable JSON: {e}") from None
-    if not isinstance(queue, dict) or not isinstance(queue.get("flagged"), list):
-        raise ValueError(
-            f"review queue {queue_path} has an unexpected shape "
-            '(expected {"updated_at": ..., "flagged": [...]})'
-        )
-    entry = None
-    for e in queue["flagged"]:
-        if (isinstance(e, dict)
-                and str(e.get("id")) == id_str
-                and str(e.get("reason")) == reason):
-            entry = e
-            break
-    if entry is None:
-        raise ValueError(
-            f"no review queue entry in {queue_path} for id={id_str} reason={reason!r}"
-        )
-    # --- DB (metadata-only jsonb write, parameterized) — uuid ids ONLY ---
-    # Commit the DB update BEFORE replacing review_queue.json so a DB error
-    # never leaves the queue file mutated out of sync with the database.
-    # A non-uuid (flag) id is a queue-only decision: the DB is never touched.
-    db_updated = 0
-    if item_id is not None:
-        from pipeline.db import get_connection
-
-        with get_connection() as conn:
-            if decision == "dismissed":
-                cur = conn.execute(
-                    "UPDATE knowledge_items SET metadata = metadata - 'review_status' WHERE id = %s",
-                    (item_id,),
-                )
-            else:  # approved — only an existing invalidated* marker is rewritten
-                # (%% is psycopg placeholder escaping for the literal % in LIKE)
-                cur = conn.execute(
-                    """
-                    UPDATE knowledge_items
-                    SET metadata = metadata || '{"review_status": "invalidated-approved"}'::jsonb
-                    WHERE id = %s AND (metadata->>'review_status') LIKE 'invalidated%%'
-                    """,
-                    (item_id,),
-                )
-            db_updated = cur.rowcount if getattr(cur, "rowcount", None) is not None else 0
-
-    now = datetime.now(timezone.utc).isoformat()
-    entry["status"] = decision
-    entry["updated_at"] = now
-    queue["updated_at"] = now
-    tmp_path = queue_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(queue, indent=2, default=str, ensure_ascii=False) + "\n")
-    os.replace(tmp_path, queue_path)
 
     _audit_bridge_write("review_decision", args)
     return {

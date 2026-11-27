@@ -346,9 +346,28 @@ async function callBridge(command: string, args: Record<string, unknown>): Promi
 
 // --- Phase 5 audit ------------------------------------------------------------
 
-/** sha256 hex of the JSON-serialized args, truncated to 16 chars (audit only). */
+/**
+ * Canonical JSON serialization matching Python's json.dumps(obj, sort_keys=True)
+ * (sorted object keys, ", " / ": " separators) so mcp_tool_write.args_sha256
+ * correlates directly with bridge_write.args_sha256.
+ */
+function canonicalJson(val: unknown): string {
+  if (val === null || typeof val !== "object") {
+    return JSON.stringify(val);
+  }
+  if (Array.isArray(val)) {
+    return "[" + val.map((v) => canonicalJson(v === undefined ? null : v)).join(", ") + "]";
+  }
+  const obj = val as Record<string, unknown>;
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined)
+    .sort();
+  return "{" + keys.map((k) => `${JSON.stringify(k)}: ${canonicalJson(obj[k])}`).join(", ") + "}";
+}
+
+/** sha256 hex of the canonical JSON-serialized args, truncated to 16 chars (audit only). */
 function argsSha256(args: unknown): string {
-  return createHash("sha256").update(JSON.stringify(args)).digest("hex").slice(0, 16);
+  return createHash("sha256").update(canonicalJson(args)).digest("hex").slice(0, 16);
 }
 
 /** Bounded wait for an audit bridge call (~2 s) — see callBridgeAudited. */
@@ -367,9 +386,10 @@ function logAuditEvent(event: Record<string, unknown>): void {
 /**
  * callBridge + audit for MUTATING tools: after every mutating tool call
  * (add_knowledge, update_item, delete_item, link_items, flag_issue,
- * review_decision) an mcp_tool_write event is recorded with the tool name and
- * a 16-char truncated sha256 of the JSON args — never the args themselves,
- * which may contain sensitive content.
+ * review_decision, and non-dry-run dream) an mcp_tool_write event is recorded
+ * with the tool name, outcome ("ok" | "error"), and a 16-char truncated sha256
+ * of the canonical JSON args — never the args themselves, which may contain
+ * sensitive content.
  *
  * Audit durability: the log_audit bridge call is AWAITED (bounded by
  * AUDIT_LOG_TIMEOUT_MS via Promise.race) BEFORE the tool result resolves, so
@@ -381,7 +401,12 @@ async function callBridgeAudited(tool: string, command: string, args: Record<str
   try {
     await Promise.race([
       runBridge("log_audit", {
-        event: { type: "mcp_tool_write", tool, args_sha256: argsSha256(args) },
+        event: {
+          type: "mcp_tool_write",
+          tool,
+          args_sha256: argsSha256(args),
+          outcome: result.isError ? "error" : "ok",
+        },
       }),
       new Promise((resolve) => {
         const t = setTimeout(resolve, AUDIT_LOG_TIMEOUT_MS);
@@ -567,7 +592,10 @@ server.registerTool(
     if (SCOPE === "read") {
       return callBridge("curator", { ...args, dry_run: true });
     }
-    return callBridge("curator", { ...args });
+    if (args.dry_run) {
+      return callBridge("curator", { ...args });
+    }
+    return callBridgeAudited("dream", "curator", { ...args });
   },
 );
 

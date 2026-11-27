@@ -471,22 +471,35 @@ def write_queue_atomic(queue_path: Path, queue: dict) -> None:
 def _locked_json_update_local(path: Path, mutator, default_factory):
     """Local stand-in for audit.locked_json_update (used only when the audit
     module — or its locked_json_update — is unavailable): an exclusive lock
-    file guards load -> mutator -> atomic write, so concurrent bridge/curator
-    writers cannot tear or lose updates. A corrupt EXISTING file raises
-    RuntimeError (refuse-on-corrupt, same as audit.load_json_file)."""
+    file (0o600, 10s stale-lock expiry) guards load -> mutator -> atomic write,
+    so concurrent bridge/curator writers cannot tear or lose updates. A corrupt
+    EXISTING file raises RuntimeError (refuse-on-corrupt, same as
+    audit.load_json_file). Yields whatever mutator returned."""
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(path.name + ".lock")
-    deadline = time.time() + 10.0
+    stale_after = 10.0
+    deadline = time.monotonic() + stale_after
     while True:
         try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             try:
-                os.write(fd, str(os.getpid()).encode("utf-8"))
+                os.write(fd, f"pid={os.getpid()}\n".encode("utf-8"))
             finally:
                 os.close(fd)
             break
         except FileExistsError:
-            if time.time() >= deadline:
+            try:
+                age = time.time() - os.path.getmtime(lock_path)
+            except OSError:
+                age = 0.0
+            if age >= stale_after:
+                try:
+                    os.unlink(lock_path)
+                except OSError:
+                    pass
+                continue
+            if time.monotonic() >= deadline:
                 raise RuntimeError(
                     f"timed out acquiring lock {lock_path} — another writer holds it"
                 ) from None
@@ -506,9 +519,9 @@ def _locked_json_update_local(path: Path, mutator, default_factory):
                 ) from None
         else:
             data = default_factory()
-        mutator(data)
+        result = mutator(data)
         write_queue_atomic(path, data)
-        yield data
+        yield result
     finally:
         try:
             os.unlink(lock_path)
@@ -524,8 +537,8 @@ def _locked_json_update(path, mutator, default_factory):
     provides it; otherwise falls back to the local equivalent
     (_locked_json_update_local). Usage:
 
-        with _locked_json_update(path, mutator, default_factory) as data:
-            ...  # mutator has been applied under the lock; data is the result
+        with _locked_json_update(path, mutator, default_factory) as result:
+            ...  # mutator has been applied under the lock; result is mutator(data)
     """
     audit = _load_audit()
     if audit is not None:
@@ -590,17 +603,30 @@ def flag_queue_flags(flag_data: dict) -> list[dict]:
     """Turn quarantine entries into review-queue flags (reason 'flagged-issue').
 
     merge_queue keys by (id, reason), so these integrate idempotently with
-    the scan-produced flags.
+    the scan-produced flags. When multiple quarantine entries reference the
+    same item_id, each uses its unique quarantine entry id (16-hex issue id)
+    so distinct flags on the same item never overwrite each other.
     """
+    entries = [e for e in flag_data.get("flagged", []) if isinstance(e, dict)]
+    item_id_counts: dict[str, int] = {}
+    for entry in entries:
+        iid = entry.get("item_id")
+        if iid:
+            key = str(iid)
+            item_id_counts[key] = item_id_counts.get(key, 0) + 1
+
     flags: list[dict] = []
-    for entry in flag_data.get("flagged", []):
-        if not isinstance(entry, dict):
-            continue
-        item_id = entry.get("item_id") or entry.get("id")
-        if not item_id:
+    for entry in entries:
+        iid = entry.get("item_id")
+        issue_id = entry.get("id")
+        if iid and item_id_counts.get(str(iid), 0) == 1:
+            queue_id = str(iid)
+        else:
+            queue_id = str(issue_id or iid or "")
+        if not queue_id:
             continue
         flags.append({
-            "id": str(item_id),
+            "id": queue_id,
             "title": entry.get("title"),
             "source_uri": None,
             "reason": FLAG_REASON,
@@ -639,21 +665,34 @@ def backfill_flag_queue_decisions(path: Path | None, merged: dict, now: datetime
 
     def _apply_decisions(data: dict) -> None:
         nonlocal matched
-        for entry in data.get("flagged", []):
-            if not isinstance(entry, dict):
-                continue
-            key = str(entry.get("item_id") or entry.get("id"))
-            if key in decided and entry.get("status") != decided[key]:
-                entry["status"] = decided[key]  # idempotent: only count changes
+        entries = [e for e in data.get("flagged", []) if isinstance(e, dict)]
+        item_id_counts: dict[str, int] = {}
+        for entry in entries:
+            iid = entry.get("item_id")
+            if iid:
+                k = str(iid)
+                item_id_counts[k] = item_id_counts.get(k, 0) + 1
+        for entry in entries:
+            issue_key = str(entry.get("id")) if entry.get("id") else None
+            iid = entry.get("item_id")
+            item_key = str(iid) if iid else None
+            # Prefer exact quarantine issue id; fall back to item_id only when
+            # item_id uniquely identifies this quarantine entry.
+            decision = None
+            if issue_key and issue_key in decided:
+                decision = decided[issue_key]
+            elif item_key and item_id_counts.get(item_key, 0) == 1 and item_key in decided:
+                decision = decided[item_key]
+            if decision is not None and entry.get("status") != decision:
+                entry["status"] = decision  # idempotent: only count changes
                 matched += 1
         if matched:
             data["updated_at"] = now.isoformat()
 
     try:
         with _locked_json_update(path, _apply_decisions,
-                                 lambda: {"updated_at": None, "flagged": []}) as data:
-            if data is not None:
-                _apply_decisions(data)  # idempotent — safe if the CM already applied it
+                                 lambda: {"updated_at": None, "flagged": []}):
+            pass
     except RuntimeError as exc:
         # corrupt/unlockable flag queue: warn and skip (never overwrite blindly)
         print(f"WARNING: cannot back-fill flag queue {path!r}: {exc}", file=sys.stderr)
@@ -754,9 +793,8 @@ def main(argv: list[str]) -> int:
 
         try:
             with _locked_json_update(queue_path, _merge_mutator,
-                                     lambda: {"updated_at": None, "flagged": []}) as data:
-                if data is not None:
-                    _merge_mutator(data)  # safe if the CM already applied it
+                                     lambda: {"updated_at": None, "flagged": []}):
+                pass
             merged = load_queue(queue_path)  # post-write state (merged under the lock)
             write_ok = f"written to {queue_path}"
         except (OSError, RuntimeError) as exc:

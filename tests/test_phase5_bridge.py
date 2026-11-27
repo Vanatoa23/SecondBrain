@@ -854,6 +854,85 @@ def test_serve_start_and_write_audit_events():
                 pass
 
 
+def test_review_fixes_regressions():
+    """Regressions for PR #4 review fixes (no DB):
+    - audit.check_external_send implicit default ports (443/80), loopback scheme
+      enforcement (reject file/ftp on localhost), case/space-insensitive off values
+    - audit.locked_json_update / write_json_atomic auto-creating missing parent dirs
+    - bridge.cmd_review_decision: UUID + reason='flagged-issue' is queue-only
+      (never touches DB) and concurrent updates do not lose writes.
+    """
+    import concurrent.futures
+
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL",
+                         "SECONDBRAIN_EXTERNAL_ALLOWLIST")}
+
+    # 1. Implicit default ports: api.example.com:443 matches https://api.example.com/v1
+    env = dict(base, SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL="1",
+               SECONDBRAIN_EXTERNAL_ALLOWLIST="api.example.com:443,localhost:80")
+    with mock.patch.dict(os.environ, env, clear=True):
+        audit.check_external_send("https://api.example.com/v1")
+        audit.check_external_send("http://localhost/v1")
+        # Non-HTTP schemes on loopback must still be refused
+        for bad_scheme in ("file://localhost/etc/passwd", "ftp://localhost/data"):
+            try:
+                audit.check_external_send(bad_scheme)
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError(f"{bad_scheme!r} was not refused")
+
+    # 2. Case/whitespace-insensitive off values
+    for off_val in ("FALSE", " Off ", " 0 "):
+        with mock.patch.dict(os.environ, dict(base, SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL=off_val), clear=True):
+            audit.check_external_send("https://anything.example.net/x")
+
+    # 3. locked_json_update creates missing parent directories
+    with tempfile.TemporaryDirectory() as td:
+        nested = os.path.join(td, "sub", "dir", "queue.json")
+        with audit.locked_json_update(nested, lambda d: d.setdefault("x", 1), dict):
+            pass
+        assert json.loads(Path(nested).read_text(encoding="utf-8")) == {"x": 1}
+
+    # 4. bridge.cmd_review_decision: UUID + reason='flagged-issue' is queue-only
+    #    (never imports/touches DB) and concurrent decisions on distinct entries
+    #    are serialized via audit.locked_json_update with no lost updates.
+    import bridge
+
+    with tempfile.TemporaryDirectory() as td:
+        qpath = os.path.join(td, "review_queue.json")
+        uid1 = str(uuid.uuid4())
+        uid2 = str(uuid.uuid4())
+        initial = {
+            "updated_at": None,
+            "flagged": [
+                {"id": uid1, "reason": "flagged-issue", "status": "pending"},
+                {"id": uid2, "reason": "flagged-issue", "status": "pending"},
+            ],
+        }
+        Path(qpath).write_text(json.dumps(initial, indent=2) + "\n", encoding="utf-8")
+        audit_path = os.path.join(td, "audit.jsonl")
+
+        with mock.patch.object(bridge, "_review_queue_path", return_value=qpath), \
+             mock.patch.object(audit, "AUDIT_LOG", audit_path):
+            def _decide(uid, dec):
+                return bridge.cmd_review_decision({
+                    "id": uid, "reason": "flagged-issue", "decision": dec,
+                })
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                f1 = pool.submit(_decide, uid1, "approved")
+                f2 = pool.submit(_decide, uid2, "dismissed")
+                r1, r2 = f1.result(), f2.result()
+
+            assert r1["queue_updated"] and r1["db_updated"] == 0, r1
+            assert r2["queue_updated"] and r2["db_updated"] == 0, r2
+            final_q = json.loads(Path(qpath).read_text(encoding="utf-8"))
+            by_id = {e["id"]: e["status"] for e in final_q["flagged"]}
+            assert by_id == {uid1: "approved", uid2: "dismissed"}, by_id
+
+
 # ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
@@ -867,6 +946,7 @@ NO_DB_TESTS = (
     test_flag_issue_concurrent_writers,
     test_log_audit_command,
     test_sanitize_error_redacts_url_query_and_fragment,
+    test_review_fixes_regressions,
 )
 
 DB_TESTS = (

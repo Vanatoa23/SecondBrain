@@ -376,7 +376,7 @@ async function main() {
           badPending.delete(id);
           reject(new Error(`timeout waiting for response to ${method}`));
         }, REQUEST_TIMEOUT_MS);
-        badPending.set(id, { resolve, timer });
+        badPending.set(id, { resolve, reject, timer });
         bad.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
       });
     };

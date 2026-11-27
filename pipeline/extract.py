@@ -185,10 +185,41 @@ def _load_audit():
 def _approval_required() -> bool:
     """True when SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL enables the gate —
     mirrors audit.check_external_send / audit._gate_enabled EXACTLY: unset
-    -> False; any value not in ("", "0", "false", "no", "off") -> True
-    (unrecognized values fail closed, matching audit's exact-match rule)."""
+    -> False; any value not in ("", "0", "false", "no", "off")
+    (case/whitespace-insensitive) -> True (unrecognized values fail closed)."""
     v = os.environ.get("SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL")
-    return v is not None and v not in ("", "0", "false", "no", "off")
+    return v is not None and v.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _safe_host(url: str) -> str | None:
+    """Extract hostname without raising ValueError on malformed URLs."""
+    from urllib.parse import urlsplit
+
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
+def _url_origin(url: str) -> tuple[str, str, int | None]:
+    """Return normalized (scheme, host, effective_port) for origin comparison."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return ("", "", None)
+    if port is None:
+        port = 443 if scheme == "https" else (80 if scheme == "http" else None)
+    return (scheme, host, port)
+
+
+def _strip_auth_headers(headers: dict) -> dict:
+    """Return a copy of headers with Authorization removed (case-insensitive)."""
+    return {k: v for k, v in headers.items() if k.lower() != "authorization"}
 
 
 def _fail_closed_when_audit_missing(audit) -> None:
@@ -219,14 +250,13 @@ def _audit_gate_external_send(api_url: str, *, purpose: str,
     if audit is None:
         _fail_closed_when_audit_missing(audit)
         return
-    from urllib.parse import urlsplit
 
     try:
         audit.check_external_send(api_url)
     except PermissionError as exc:
         raise RuntimeError(
             _sanitize(
-                f"external send to host {urlsplit(api_url).hostname!r} refused "
+                f"external send to host {_safe_host(api_url)!r} refused "
                 f"(external approval required): {exc}"
             )
         ) from exc
@@ -235,7 +265,7 @@ def _audit_gate_external_send(api_url: str, *, purpose: str,
         audit.log_event(
             "external_send",
             direction="out",
-            endpoint=urlsplit(api_url).hostname,
+            endpoint=_safe_host(api_url),
             purpose=purpose,
             model=model,
             payload_bytes=len(body_bytes),
@@ -253,8 +283,6 @@ def _regate_redirect_hop(new_url: str, *, purpose: str,
     request is made to it — and logs one "external_send" event with the NEW
     endpoint host. Fail closed when approval is required but audit is missing.
     """
-    from urllib.parse import urlsplit
-
     audit = _load_audit()
     if audit is None:
         _fail_closed_when_audit_missing(audit)
@@ -265,7 +293,7 @@ def _regate_redirect_hop(new_url: str, *, purpose: str,
         audit.log_event(
             "external_send",
             direction="out",
-            endpoint=urlsplit(new_url).hostname,
+            endpoint=_safe_host(new_url),
             purpose=purpose,
             model=model,
             payload_bytes=len(body_bytes),
@@ -304,12 +332,14 @@ def _post_with_retries(url: str, headers: dict, payload: dict,
 
     Redirects (3xx with a Location header) are followed MANUALLY with
     allow_redirects=False, re-gated per hop (max _MAX_API_REDIRECTS); a 3xx
-    without Location or too many hops raises ValueError.
+    without Location or too many hops raises ValueError. Authorization headers
+    are stripped whenever a redirect crosses origins.
     """
     from urllib.parse import urljoin
 
     use_response_format = True
     current_url = url
+    current_headers = headers
     hops = 0
     while True:
         last_error = "unknown error"
@@ -320,7 +350,7 @@ def _post_with_retries(url: str, headers: dict, payload: dict,
                 body.pop("response_format", None)
             try:
                 # allow_redirects=False — manual, re-gated redirect loop below
-                resp = requests.post(current_url, headers=headers, json=body,
+                resp = requests.post(current_url, headers=current_headers, json=body,
                                      timeout=timeout, allow_redirects=False)
             except requests.RequestException as exc:
                 last_error = f"request error: {type(exc).__name__}: {exc}"
@@ -383,6 +413,8 @@ def _post_with_retries(url: str, headers: dict, payload: dict,
             # Re-gate + re-log EVERY hop before re-POSTing (audit-A finding 2).
             # PermissionError propagates — refused before dialing the new host.
             _regate_redirect_hop(new_url, purpose=purpose, model=model, payload=payload)
+            if _url_origin(new_url) != _url_origin(current_url):
+                current_headers = _strip_auth_headers(current_headers)
             current_url = new_url
             continue
         raise RuntimeError(

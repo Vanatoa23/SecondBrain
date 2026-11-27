@@ -99,12 +99,12 @@ _LOCK_STALE_AFTER = 10.0
 
 def _gate_enabled() -> bool:
     """True when SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL is set to any value NOT
-    in ("", "0", "false", "no", "off"). Unset -> False (no-op). Unrecognized
-    values -> True (fail closed)."""
+    in ("", "0", "false", "no", "off") (case/whitespace-insensitive). Unset ->
+    False (no-op). Unrecognized values -> True (fail closed)."""
     value = os.environ.get("SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL")
     if value is None:
         return False
-    return value not in _GATE_OFF_VALUES
+    return value.strip().lower() not in _GATE_OFF_VALUES
 
 
 def _split_allowlist_entry(entry: str) -> tuple[str, int | None]:
@@ -141,10 +141,11 @@ def check_external_send(url: str) -> None:
       * the host must match one of the comma-separated allowlist entries in
         SECONDBRAIN_EXTERNAL_ALLOWLIST — entries are "host" or "host:port"
         (lowercase, stripped); an entry without a port matches any port, an
-        entry with a port matches only that port;
+        entry with a port matches that port (including implicit default ports
+        443 for https and 80 for http);
       * the scheme must be https, unless the host is loopback (127.0.0.1,
-        ::1, localhost) — plain http to a non-loopback host is refused, so
-        local http://127.0.0.1:11434 stays allowed.
+        ::1, localhost) where plain http is also allowed — non-http(s) schemes
+        and plain http to non-loopback hosts are always refused.
 
     Every refusal raises PermissionError with HOST-ONLY text — the full URL
     is never included. Called before every external POST.
@@ -196,23 +197,26 @@ def check_external_send(url: str) -> None:
             u3_host = u3_host[1:-1]  # bracketed IPv6
         if u3_host != host:
             raise _refuse("host parser mismatch")
-    # 3. allowlist match ("host" or "host:port" entries)
+    # 3. allowlist match ("host" or "host:port" entries, with implicit default ports)
     if unparsable:
         raise _refuse("unparsable URL")
+    eff_port = port if port is not None else (
+        443 if scheme == "https" else (80 if scheme == "http" else None)
+    )
     allowed = False
     for raw_entry in os.environ.get("SECONDBRAIN_EXTERNAL_ALLOWLIST", "").split(","):
         entry = raw_entry.strip().lower()
         if not entry:
             continue
         e_host, e_port = _split_allowlist_entry(entry)
-        if host == e_host and (e_port is None or (port is not None and port == e_port)):
+        if host == e_host and (e_port is None or (eff_port is not None and eff_port == e_port)):
             allowed = True
             break
     if not allowed:
         raise _refuse("host not in allowlist")
-    # 4. scheme must be https unless the host is loopback
-    if scheme != "https" and host not in _LOOPBACK_HOSTS:
-        raise _refuse("plain http to non-loopback host (https required)")
+    # 4. scheme must be https (or plain http to loopback only — never file/ftp/etc.)
+    if not (scheme == "https" or (scheme == "http" and host in _LOOPBACK_HOSTS)):
+        raise _refuse("unsupported or insecure scheme (https required)")
 
 
 def load_json_file(path: str | os.PathLike, default: Any) -> Any:
@@ -243,6 +247,9 @@ def write_json_atomic(path: str | os.PathLike, obj: Any) -> None:
     (try/finally) and the original file is left untouched.
     """
     p = os.fspath(path)
+    parent = os.path.dirname(os.path.abspath(p))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     tmp = f"{p}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -313,6 +320,9 @@ def locked_json_update(path: str | os.PathLike,
     Yields whatever mutator returned.
     """
     p = os.fspath(path)
+    parent = os.path.dirname(os.path.abspath(p))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     lock_path = f"{p}.lock"
     fd = _acquire_lockfile(lock_path)
     try:

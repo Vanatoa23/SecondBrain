@@ -90,12 +90,43 @@ def _load_audit():
 def _approval_required() -> bool:
     """True when SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL enables the gate —
     mirrors audit.check_external_send / audit._gate_enabled EXACTLY: unset
-    -> False; any value not in ("", "0", "false", "no", "off") -> True
-    (unrecognized values fail closed, matching audit's exact-match rule)."""
+    -> False; any value not in ("", "0", "false", "no", "off")
+    (case/whitespace-insensitive) -> True (unrecognized values fail closed)."""
     import os
 
     v = os.environ.get("SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL")
-    return v is not None and v not in ("", "0", "false", "no", "off")
+    return v is not None and v.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _safe_host(url: str) -> str | None:
+    """Extract hostname without raising ValueError on malformed URLs."""
+    from urllib.parse import urlsplit
+
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
+def _url_origin(url: str) -> tuple[str, str, int | None]:
+    """Return normalized (scheme, host, effective_port) for origin comparison."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return ("", "", None)
+    if port is None:
+        port = 443 if scheme == "https" else (80 if scheme == "http" else None)
+    return (scheme, host, port)
+
+
+def _strip_auth_headers(headers: dict) -> dict:
+    """Return a copy of headers with Authorization removed (case-insensitive)."""
+    return {k: v for k, v in headers.items() if k.lower() != "authorization"}
 
 
 def _fail_closed_when_audit_missing(audit) -> None:
@@ -121,7 +152,6 @@ def _audit_gate_external_send(api_url: str, *, purpose: str,
     raises RuntimeError instead of proceeding (audit-A finding 3).
     """
     import json
-    from urllib.parse import urlsplit
 
     audit = _load_audit()
     if audit is None:
@@ -132,7 +162,7 @@ def _audit_gate_external_send(api_url: str, *, purpose: str,
     except PermissionError as exc:
         raise RuntimeError(
             _sanitize(
-                f"external send to host {urlsplit(api_url).hostname!r} refused "
+                f"external send to host {_safe_host(api_url)!r} refused "
                 f"(external approval required): {exc}"
             )
         ) from exc
@@ -141,7 +171,7 @@ def _audit_gate_external_send(api_url: str, *, purpose: str,
         audit.log_event(
             "external_send",
             direction="out",
-            endpoint=urlsplit(api_url).hostname,
+            endpoint=_safe_host(api_url),
             purpose=purpose,
             model=model,
             payload_bytes=len(body_bytes),
@@ -160,7 +190,6 @@ def _regate_redirect_hop(new_url: str, *, purpose: str,
     endpoint host. Fail closed when approval is required but audit is missing.
     """
     import json
-    from urllib.parse import urlsplit
 
     audit = _load_audit()
     if audit is None:
@@ -172,7 +201,7 @@ def _regate_redirect_hop(new_url: str, *, purpose: str,
         audit.log_event(
             "external_send",
             direction="out",
-            endpoint=urlsplit(new_url).hostname,
+            endpoint=_safe_host(new_url),
             purpose=purpose,
             model=model,
             payload_bytes=len(body_bytes),
@@ -623,12 +652,13 @@ def _extract_image_vision(path_or_bytes: str | bytes) -> str:
     from urllib.parse import urljoin as _urljoin
 
     current_url = api_url.rstrip("/") + "/chat/completions"
+    current_headers = headers
     hops = 0
     while True:
         try:
             resp = requests.post(
                 current_url,
-                headers=headers,
+                headers=current_headers,
                 json=payload,
                 timeout=_VISION_TIMEOUT_S,
                 allow_redirects=False,  # manual, re-gated redirect loop
@@ -656,6 +686,8 @@ def _extract_image_vision(path_or_bytes: str | bytes) -> str:
             # Re-gate + re-log EVERY hop before re-POSTing; PermissionError
             # propagates — refused before dialing the new host.
             _regate_redirect_hop(new_url, purpose="vision", model=model, payload=payload)
+            if _url_origin(new_url) != _url_origin(current_url):
+                current_headers = _strip_auth_headers(current_headers)
             current_url = new_url
             continue
         try:
