@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Second Brain — Dropbox (insert)</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="insert">
+  <header>
+    <h1>Second Brain — Dropbox</h1>
+    <nav><a href="/">Insert</a> <span aria-hidden="true">·</span> <a href="/retrieve">Retrieve</a></nav>
+  </header>
+  <main>
+    <form id="ingest-form">
+      <fieldset>
+        <legend>Source</legend>
+        <label><input type="radio" name="mode" value="text" checked> Raw text</label>
+        <label><input type="radio" name="mode" value="url"> URL</label>
+        <label><input type="radio" name="mode" value="file"> File (.txt / .md / .pdf — saved to dropbox/inbox/ first)</label>
+      </fieldset>
+
+      <div class="mode-panel" id="panel-text">
+        <label for="raw-text">Text</label>
+        <textarea id="raw-text" rows="12" placeholder="Paste raw text here…"></textarea>
+      </div>
+
+      <div class="mode-panel" id="panel-url" hidden>
+        <label for="url-input">URL</label>
+        <input id="url-input" type="url" placeholder="https://example.com/article">
+      </div>
+
+      <div class="mode-panel" id="panel-file" hidden>
+        <label for="file-input">File</label>
+        <input id="file-input" type="file" accept=".txt,.md,.text,.pdf">
+      </div>
+
+      <label for="title-input">Title (optional)</label>
+      <input id="title-input" type="text" maxlength="500" placeholder="Optional title for this knowledge item">
+
+      <button type="submit" id="submit-btn">Ingest</button>
+    </form>
+
+    <section id="response" aria-live="polite"></section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

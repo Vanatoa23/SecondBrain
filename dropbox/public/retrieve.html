@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Second Brain — Retrieve</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="retrieve">
+  <header>
+    <h1>Second Brain — Retrieve</h1>
+    <nav><a href="/">Insert</a> <span aria-hidden="true">·</span> <a href="/retrieve">Retrieve</a></nav>
+  </header>
+  <main>
+    <form id="search-form">
+      <label for="query-input">Query</label>
+      <input id="query-input" type="text" required placeholder="What do you want to remember?">
+
+      <fieldset>
+        <legend>Methods</legend>
+        <label><input type="checkbox" class="method-box" value="vector" checked> vector</label>
+        <label><input type="checkbox" class="method-box" value="fts" checked> fts</label>
+        <label><input type="checkbox" class="method-box" value="graph" checked> graph</label>
+      </fieldset>
+
+      <label for="hops-input">Hops (graph)</label>
+      <input id="hops-input" type="number" min="1" max="5" step="1" value="1">
+
+      <label for="topk-input">Top K (merged)</label>
+      <input id="topk-input" type="number" min="1" max="100" step="1" value="10">
+
+      <button type="submit" id="submit-btn">Search</button>
+    </form>
+
+    <section id="response" aria-live="polite"></section>
+
+    <div id="panels" hidden>
+      <section class="panel" id="panel-merged">
+        <h2>Merged + reranked <span class="count" id="count-merged"></span></h2>
+        <ol class="results" id="results-merged"></ol>
+      </section>
+      <section class="panel" id="panel-vector">
+        <h2>Raw — vector <span class="count" id="count-vector"></span></h2>
+        <ol class="results" id="results-vector"></ol>
+      </section>
+      <section class="panel" id="panel-fts">
+        <h2>Raw — fts <span class="count" id="count-fts"></span></h2>
+        <ol class="results" id="results-fts"></ol>
+      </section>
+      <section class="panel" id="panel-graph">
+        <h2>Raw — graph <span class="count" id="count-graph"></span></h2>
+        <ol class="results" id="results-graph"></ol>
+      </section>
+    </div>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

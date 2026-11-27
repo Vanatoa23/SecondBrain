@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Second Brain — Review Queue</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="review">
+  <header>
+    <h1>Second Brain — Review Queue</h1>
+    <!-- nav is rendered by app.js on this page only (index/retrieve keep their own static nav) -->
+    <nav id="site-nav"></nav>
+  </header>
+  <main>
+    <p class="status" id="review-summary">Loading review queue…</p>
+    <section id="review-queue" aria-live="polite"></section>
+
+    <section class="panel" id="review-decided" hidden>
+      <h2>Decided <span class="count" id="review-decided-count"></span></h2>
+      <ol class="flags" id="review-decided-list"></ol>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
