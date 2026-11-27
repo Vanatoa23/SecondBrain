@@ -22,6 +22,13 @@
 
 ---
 
+## [2026-11-27 03:26] PROCESS: PUBLISHED to GitHub Vanatoa23/SecondBrain — PR #1 merged into main (merge commit 3f7908b)
+- **Decided by**: PM, per User standing authorization [2026-11-26 23:48] ("push and merge everything to the secondbrain github repo")
+- **Rationale**: Phase 4 complete and reviewer-approved (APPROVE 1/3, zero blockers, all batches); user asked for the full publish. Local checkout had no origin remote, so the connector_github_app tools were used: branch `pm-autonomous-work` created from `main` (0a0432f); 88 tracked files (manifest from `git ls-files`, all strict UTF-8, sensitive-path grep clean) pushed as 4 commits — dd19de8 (23 files), f5aeb90 (35), 1dee794 (15), 8c75ae6 (15); PR #1 https://github.com/Vanatoa23/SecondBrain/pull/1 (base=main, head=8c75ae6631e11afd47772ab60e75ed427254eef5) merged with merge_method=merge and matching expectedHeadSha; no force-push. Verified on main @ 3f7908b2d237dd9063f8ecf1e7b975406ee6f670: 7 commits, root tree complete (db/ pipeline/ retrieval/ bridge.py mcp-server/ dropbox/ scripts/ tests/ PM_*.md README.md ROADMAP.md .gitignore requirements.txt), spot-checked db/schema.sql (incl. partial entity:// unique index), tests/test_phase4_acceptance.py, README.md. This entry + the ROADMAP publish line are carried to GitHub by docs-only PR #2.
+- **Impact**: Full Phases 1-4 system now public at https://github.com/Vanatoa23/SecondBrain. Local master stays the working checkout (no origin configured locally; future pushes go through the same connector route).
+- **Related**: PR #1 (merged), merge commit 3f7908b, branch pm-autonomous-work, PR #2 (docs: this entry), cron loop 4e0eac40 (cancelled after publish)
+- **Status**: Active
+
 ## [2026-11-27 03:30] FEATURE: PHASE 4 COMPLETE — all batches merged incl. acceptance e2e; next: publish to GitHub Vanatoa23/SecondBrain
 - **Decided by**: PM (merges); Reviewers APPROVE at iteration 1/3 for every batch, zero blockers; User standing authorization [2026-11-26 23:48]
 - **Rationale**: Whole Phase 4 delivered in the loop format: B1 curator core (staleness/contradiction/gap scan, review_queue.json with preserved human decisions, soft metadata-only invalidation) + wiki export + MCP dream wired to curator; B2 dropbox review UI (/review + decision API, CSRF-guarded) + lesson extraction from postmortems + contradiction e2e (ROADMAP acceptance: one curator run invalidates the older fact, soft, never deleted, still searchable); B3 phase4 acceptance e2e (curator + invalidation + search visibility + wiki + dream via MCP in one guarded run).
