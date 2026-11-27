@@ -50,7 +50,7 @@ TEST_DBNAME_RE = re.compile(r"(?:^|_)test(?:_|$)", re.IGNORECASE)
 EXTRACT_ENV = {
     "EXTRACT_API_URL": "https://llm.example.test/v1",
     "EXTRACT_MODEL": "some-test-model",
-    "EXTRACT_API_KEY": "sk-test-secret-key-123",
+    "EXTRACT_API_KEY": "dummy-extract-key-test",
 }
 API_KEY = EXTRACT_ENV["EXTRACT_API_KEY"]
 

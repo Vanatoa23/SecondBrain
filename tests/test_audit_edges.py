@@ -241,7 +241,7 @@ def test_ingest_outer_hook_except_is_sanitized():
     """Reviewer LOW: the outer `except Exception` around _run_llm_extraction in
     ingest() must pass the message through pipeline.extract._sanitize before
     printing — the raw exception text may embed EXTRACT_API_KEY."""
-    key = "sk-audit-regression-key-456"
+    key = "dummy-audit-regression-key-456"
     fake_conn = FakeConn()
 
     def boom(text, source_uri, conn, doc_id=None):

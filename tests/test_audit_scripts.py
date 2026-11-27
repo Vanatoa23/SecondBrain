@@ -4,10 +4,13 @@ scripts/ (export_chat, restore.sh, audit_edges, sync_notes).
 Covers (external audit findings, worker W3):
 
   1. bridge review_decision — updates the repo-root review_queue.json entry
-     (keyed by id+reason) AND the DB: "approved" rewrites an existing
-     "invalidated*" metadata.review_status to "invalidated-approved" (no-op
-     otherwise); "dismissed" removes the review_status key. ValueError
-     envelopes on missing queue / no matching entry / bad input.
+     (keyed by id+reason) AND the DB when "id" is a uuid: "approved" rewrites
+     an existing "invalidated*" metadata.review_status to
+     "invalidated-approved" (no-op otherwise); "dismissed" removes the
+     review_status key. ValueError envelopes on missing queue / no matching
+     entry / bad input. A NON-uuid id (a 16-hex flag-queue id) is a QUEUE-ONLY
+     decision: queue updated, DB never touched (db_updated == 0, proven with
+     no database URL at all).
   2. path confinement — a file in the PLAIN system temp dir is REFUSED, one in
      <tempdir>/secondbrain-staging is ACCEPTED.
   3. store_raw for a pdf path stores the file BYTES (raw/<2>/<sha> content ==
@@ -23,6 +26,24 @@ Covers (external audit findings, worker W3):
   8. extract_url pinned resolution — socket.getaddrinfo is consulted exactly
      once per HTTP request (the guard) and the fetch dials ONLY the pinned
      IP; a simulated DNS rebind (public -> 127.0.0.1) is never dialed.
+  9. Phase 5 external-send gate (pipeline/extract.py + pipeline/extractors.py
+     vision path) via the repo-root audit.py: with
+     SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL=1 and a non-allowlisted
+     EXTRACT_API_URL / VISION_API_URL, extract_knowledge /
+     _extract_image_vision refuse with a clean sanitized RuntimeError, NO
+     request is made and NO external_send event is logged; with the host in
+     SECONDBRAIN_EXTERNAL_ALLOWLIST the POST (mocked) proceeds and exactly one
+     external_send event is logged with direction/endpoint/purpose/model/
+     payload_bytes; with the gate unset the check is a no-op and the send
+     proceeds; with the audit module unimportable AND
+     SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL=1 extraction FAILS CLOSED (no
+     request is made — F-B pipeline change). extract_youtube logs an
+     external_fetch (purpose="ingest") event before fetching.
+ 10. curator flag-queue pickup + back-fill (scripts/curator.py): a seeded
+     flagged_issues.json (tmp path via SECONDBRAIN_FLAG_QUEUE / audit.FLAG_QUEUE)
+     is merged into the review queue as reason "flagged-issue" pending
+     entries; once the queue entry is marked decided, a re-run back-fills the
+     quarantine entry's status atomically; --dry-run writes neither file.
 
 Guard pattern (locked — same invariant as tests/test_bridge.py):
 
@@ -44,6 +65,7 @@ Run from the repo root:
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import ipaddress
 import json
@@ -84,6 +106,89 @@ def _load_script(name: str):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 audit-gate helpers — use the REAL repo-root audit.py (W1). audit
+# computes AUDIT_LOG / FLAG_QUEUE at import time, so reload it while the
+# SECONDBRAIN_* env is patched to point them into the tmp dir.
+# ---------------------------------------------------------------------------
+
+
+def _audit_module():
+    import audit
+    try:
+        importlib.reload(audit)  # re-read SECONDBRAIN_AUDIT_LOG / _FLAG_QUEUE
+    except Exception:
+        pass
+    return audit
+
+
+@contextlib.contextmanager
+def audit_env(tmp_path, *, require_approval=None, allowlist=None, flag_queue=None):
+    """Patch the SECONDBRAIN_* audit env vars; yield (audit_module, log_path)."""
+    log_path = Path(tmp_path) / "audit_log.jsonl"
+    patch_env = {"SECONDBRAIN_AUDIT_LOG": str(log_path)}
+    if require_approval is not None:
+        patch_env["SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL"] = require_approval
+    if allowlist is not None:
+        patch_env["SECONDBRAIN_EXTERNAL_ALLOWLIST"] = allowlist
+    if flag_queue is not None:
+        patch_env["SECONDBRAIN_FLAG_QUEUE"] = str(flag_queue)
+    with mock.patch.dict(os.environ, patch_env):
+        if require_approval is None:
+            os.environ.pop("SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL", None)
+        if allowlist is None:
+            os.environ.pop("SECONDBRAIN_EXTERNAL_ALLOWLIST", None)
+        mod = _audit_module()
+        yield mod, log_path
+
+
+def _read_events(log_path) -> list[dict]:
+    p = Path(log_path)
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            out.append(json.loads(line))
+    return out
+
+
+class _GateResp:
+    """Minimal 200 chat-completions response double."""
+    status_code = 200
+    text = ""
+
+    def __init__(self, content='{"entities": [], "relations": []}'):
+        self._payload = {"choices": [{"message": {"content": content}}]}
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        return None
+
+
+GATE_EXTRACT_ENV = {
+    "EXTRACT_API_URL": "https://not-allowed.example/v1",
+    "EXTRACT_MODEL": "gate-test-model",
+    "EXTRACT_API_KEY": "w3-gate-dummy-value",
+}
+GATE_VISION_ENV = {
+    "VISION_API_URL": "https://not-allowed-vision.example/v1",
+    "VISION_MODEL": "vision-gate-model",
+    "VISION_API_KEY": "vk-w3-secret",
+}
+
+
+def _png_bytes() -> bytes:
+    import io as _io
+    from PIL import Image
+    buf = _io.BytesIO()
+    Image.new("RGB", (8, 8), (0, 128, 255)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +389,53 @@ def test_review_decision_queue_and_db():
             cleanup_test_rows()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# 1b. review_decision with a NON-uuid (16-hex flag) id — queue-ONLY, no DB
+# ---------------------------------------------------------------------------
+
+
+def test_review_decision_flag_id_is_queue_only():
+    """A non-uuid id (one of the 16-hex flag-queue ids from flag_issue) is a
+    QUEUE-ONLY decision: review_queue.json is updated and the DB is never
+    touched (db_updated == 0) — proven by running with NO database URL at
+    all (any DB access would fail the command)."""
+    flag_id = "a1b2c3d4e5f60718"
+    backup = QUEUE_PATH.read_bytes() if QUEUE_PATH.exists() else None
+    try:
+        _write_queue([{
+            "id": flag_id, "title": "flagged issue", "source_uri": None,
+            "reason": "flagged-issue", "evidence": "the description", "status": "open",
+        }])
+        env = run_bridge("review_decision", {
+            "id": flag_id, "reason": "flagged-issue", "decision": "dismissed",
+        })  # no url -> no DATABASE_URL in the child -> DB access impossible
+        assert env["ok"] is True, env
+        assert env["result"]["queue_updated"] is True, env["result"]
+        assert env["result"]["db_updated"] == 0, env["result"]
+        assert env["result"]["id"] == flag_id, env["result"]
+        entry = [e for e in _read_queue()["flagged"] if e["id"] == flag_id][0]
+        assert entry["status"] == "dismissed" and entry.get("updated_at"), entry
+
+        # "approved" on a flag id is queue-only too
+        env = run_bridge("review_decision", {
+            "id": flag_id, "reason": "flagged-issue", "decision": "approved",
+        })
+        assert env["ok"] is True and env["result"]["db_updated"] == 0, env
+        entry = [e for e in _read_queue()["flagged"] if e["id"] == flag_id][0]
+        assert entry["status"] == "approved", entry
+
+        # unknown non-uuid id -> clean error envelope
+        env = run_bridge("review_decision", {
+            "id": "deadbeefdeadbeef", "reason": "flagged-issue", "decision": "approved",
+        })
+        assert env["ok"] is False and "no review queue entry" in env["error"], env
+    finally:
+        if backup is not None:
+            QUEUE_PATH.write_bytes(backup)
+        elif QUEUE_PATH.exists():
+            QUEUE_PATH.unlink()  # we created the fixture — remove it again
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +722,239 @@ def test_extract_url_pinned_resolution():
 
 
 # ---------------------------------------------------------------------------
+# 9. Phase 5 external-send gate — pipeline/extract.py (llm-extraction)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_gate_refuses_non_allowlisted_host():
+    from pipeline import extract as extract_mod
+    with tempfile.TemporaryDirectory() as td:
+        with audit_env(td, require_approval="1", allowlist="allowed.example") as (_m, log_path):
+            with mock.patch.dict(os.environ, GATE_EXTRACT_ENV), \
+                 mock.patch("requests.post") as post:
+                try:
+                    extract_mod.extract_knowledge("hello gate")
+                except RuntimeError as exc:
+                    msg = str(exc)
+                else:
+                    raise AssertionError("extract_knowledge did not refuse the non-allowlisted host")
+                assert post.call_count == 0, "no request may be made when the gate refuses"
+                assert "refused" in msg, msg
+                assert GATE_EXTRACT_ENV["EXTRACT_API_KEY"] not in msg, msg  # key stripped
+            events = _read_events(log_path)
+            assert not any(e.get("event") == "external_send" for e in events), events
+
+
+def test_extract_gate_allowlisted_host_posts_and_logs_event():
+    from pipeline import extract as extract_mod
+    api_url = "https://llm-allowed.example/v1"
+    with tempfile.TemporaryDirectory() as td:
+        with audit_env(td, require_approval="1", allowlist="llm-allowed.example") as (_m, log_path):
+            env = {"EXTRACT_API_URL": api_url, "EXTRACT_MODEL": "gate-test-model",
+                   "EXTRACT_API_KEY": "w3-gate-dummy-value"}
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch("requests.post", return_value=_GateResp()) as post:
+                result = extract_mod.extract_knowledge("some text")
+            assert result == {"entities": [], "relations": []}, result
+            assert post.call_count == 1, post.call_count
+            assert post.call_args.args[0] == api_url + "/chat/completions", post.call_args
+            body = post.call_args.kwargs["json"]
+            sends = [e for e in _read_events(log_path) if e.get("event") == "external_send"]
+            assert len(sends) == 1, _read_events(log_path)
+            ev = sends[0]
+            assert ev["direction"] == "out", ev
+            assert ev["endpoint"] == "llm-allowed.example", ev
+            assert ev["purpose"] == "llm-extraction", ev
+            assert ev["model"] == "gate-test-model", ev
+            assert ev["payload_bytes"] == len(json.dumps(body).encode("utf-8")), ev
+
+
+def test_extract_gate_unset_is_noop():
+    from pipeline import extract as extract_mod
+    with tempfile.TemporaryDirectory() as td:
+        with audit_env(td) as (_m, log_path):  # SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL unset
+            with mock.patch.dict(os.environ, GATE_EXTRACT_ENV), \
+                 mock.patch("requests.post", return_value=_GateResp()) as post:
+                result = extract_mod.extract_knowledge("some text")
+            assert result == {"entities": [], "relations": []}, result
+            assert post.call_count == 1, "gate unset -> check is a no-op, the send proceeds"
+            sends = [e for e in _read_events(log_path) if e.get("event") == "external_send"]
+            assert len(sends) == 1 and sends[0]["purpose"] == "llm-extraction", sends
+
+
+def test_extract_gate_fails_closed_when_audit_module_missing():
+    from pipeline import extract as extract_mod
+    # sys.modules["audit"] = None makes `import audit` raise ImportError.
+    # With SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL=1 set, extraction must now
+    # FAIL CLOSED (pipeline change by the F-B worker): NO request may be made.
+    with mock.patch.dict(sys.modules, {"audit": None}), \
+         mock.patch.dict(os.environ, {**GATE_EXTRACT_ENV,
+                                       "SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL": "1",
+                                       "SECONDBRAIN_EXTERNAL_ALLOWLIST": ""}):
+        with mock.patch("requests.post", return_value=_GateResp()) as post:
+            try:
+                extract_mod.extract_knowledge("some text")
+            except Exception as exc:
+                msg = f"{type(exc).__name__}: {exc}"
+            else:
+                raise AssertionError(
+                    "with SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL=1 and the audit module "
+                    "unimportable, extraction must FAIL CLOSED (no request)"
+                )
+    assert post.call_count == 0, "no request may be made when the gate fails closed"
+    assert GATE_EXTRACT_ENV["EXTRACT_API_KEY"] not in msg, msg  # key never leaks
+
+
+# ---------------------------------------------------------------------------
+# 9b. Phase 5 external-send gate — vision path (pipeline/extractors.py)
+# ---------------------------------------------------------------------------
+
+
+def test_vision_gate_refuses_non_allowlisted_host():
+    from pipeline import extractors
+    with tempfile.TemporaryDirectory() as td:
+        with audit_env(td, require_approval="1", allowlist="vision-allowed.example") as (_m, log_path):
+            with mock.patch.dict(os.environ, GATE_VISION_ENV), \
+                 mock.patch("requests.post") as post:
+                try:
+                    extractors._extract_image_vision(_png_bytes())
+                except RuntimeError as exc:
+                    msg = str(exc)
+                else:
+                    raise AssertionError("vision path did not refuse the non-allowlisted host")
+                assert post.call_count == 0, "no request may be made when the gate refuses"
+                assert GATE_VISION_ENV["VISION_API_KEY"] not in msg, msg  # key stripped
+            events = _read_events(log_path)
+            assert not any(e.get("event") == "external_send" for e in events), events
+
+
+def test_vision_gate_allowlisted_host_posts_and_logs_event():
+    from pipeline import extractors
+    api_url = "https://vision-allowed.example/v1"
+    with tempfile.TemporaryDirectory() as td:
+        with audit_env(td, require_approval="1", allowlist="vision-allowed.example") as (_m, log_path):
+            env = {"VISION_API_URL": api_url, "VISION_MODEL": "vision-gate-model",
+                   "VISION_API_KEY": "vk-w3-secret"}
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch("requests.post", return_value=_GateResp("a small blue square")) as post:
+                text = extractors._extract_image_vision(_png_bytes())
+            assert text == "a small blue square", text
+            assert post.call_count == 1, post.call_count
+            assert post.call_args.args[0] == api_url + "/chat/completions", post.call_args
+            body = post.call_args.kwargs["json"]
+            sends = [e for e in _read_events(log_path) if e.get("event") == "external_send"]
+            assert len(sends) == 1, _read_events(log_path)
+            ev = sends[0]
+            assert ev["direction"] == "out" and ev["purpose"] == "vision", ev
+            assert ev["endpoint"] == "vision-allowed.example", ev
+            assert ev["model"] == "vision-gate-model", ev
+            assert ev["payload_bytes"] == len(json.dumps(body).encode("utf-8")), ev
+
+
+def test_youtube_ingest_logs_external_fetch():
+    from pipeline import extractors
+    yt_url = "https://www.youtube.com/watch?v=w3test"
+    with tempfile.TemporaryDirectory() as td:
+        with audit_env(td) as (_m, log_path):
+            # public-IP DNS answer so the SSRF guard passes without network
+            with mock.patch("socket.getaddrinfo",
+                            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                           ("93.184.216.34", 443))]):
+                res = extractors.extract_youtube(
+                    yt_url, runner=lambda u, w: {"subtitle_path": None,
+                                                 "info": {"title": "T", "description": "D"}})
+            assert "T" in res.text and yt_url in res.text, res.text
+            fetches = [e for e in _read_events(log_path) if e.get("event") == "external_fetch"]
+            assert len(fetches) == 1, _read_events(log_path)
+            ev = fetches[0]
+            # the raw URL is never logged (it may carry ?api_key=... secrets):
+            # only the endpoint hostname + a 16-hex sha256 of the full URL
+            assert "url" not in ev, ev
+            assert ev["endpoint"] == "www.youtube.com", ev
+            assert ev["url_sha256"] == __import__("hashlib").sha256(
+                yt_url.encode("utf-8")).hexdigest()[:16], ev
+            assert ev["purpose"] == "ingest", ev
+
+
+# ---------------------------------------------------------------------------
+# 10. curator flag-queue pickup + decision back-fill (needs the guarded test DB)
+# ---------------------------------------------------------------------------
+
+
+def test_curator_flag_queue_pickup_and_backfill():
+    url = os.environ["TEST_DATABASE_URL"]
+    curator = _load_script("curator")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        flag_path = td / "flagged_issues.json"
+        queue_path = td / "review_queue.json"
+        item_id = None
+        try:
+            with _db() as conn:
+                item_id = _seed_item(conn, None)
+            flag_entry = {
+                "id": "issue-w3-1",
+                "item_id": item_id,
+                "title": "Flagged by reviewer",
+                "description": "This item looks wrong to me",
+                "severity": "high",
+                "reporter": "reviewer-1",
+                "status": "open",
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+            flag_path.write_text(
+                json.dumps({"updated_at": flag_entry["created_at"], "flagged": [flag_entry]},
+                           indent=2) + "\n", encoding="utf-8")
+
+            with audit_env(td, flag_queue=flag_path) as (audit_mod, _log):
+                # audit.FLAG_QUEUE is an import-time constant — point it at the tmp file
+                with mock.patch.object(audit_mod, "FLAG_QUEUE", str(flag_path)):
+                    rc = curator.main(["--queue", str(queue_path)])
+                    assert rc == 0, rc
+                    data = json.loads(queue_path.read_text(encoding="utf-8"))
+                    entries = [e for e in data["flagged"] if e.get("reason") == "flagged-issue"]
+                    assert len(entries) == 1, data["flagged"]
+                    e = entries[0]
+                    assert str(e["id"]) == item_id, e
+                    assert e["status"] == "pending", e
+                    assert e["title"] == "Flagged by reviewer", e
+                    assert e["source_uri"] is None, e
+                    assert "This item looks wrong to me" in e["evidence"], e
+                    assert "severity=high" in e["evidence"], e
+                    assert "reporter=reviewer-1" in e["evidence"], e
+                    assert "issue=issue-w3-1" in e["evidence"], e
+                    # pending -> the quarantine entry is untouched
+                    fq = json.loads(flag_path.read_text(encoding="utf-8"))
+                    assert fq["flagged"][0]["status"] == "open", fq
+
+                    # mark the flagged-issue entry decided in the review queue, re-run
+                    e["status"] = "approved"
+                    queue_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                    rc = curator.main(["--queue", str(queue_path)])
+                    assert rc == 0, rc
+                    data2 = json.loads(queue_path.read_text(encoding="utf-8"))
+                    e2 = [x for x in data2["flagged"] if x.get("reason") == "flagged-issue"][0]
+                    assert e2["status"] == "approved", e2  # decision preserved by the merge
+                    fq2 = json.loads(flag_path.read_text(encoding="utf-8"))
+                    assert fq2["flagged"][0]["status"] == "approved", fq2  # back-filled
+
+                    # --dry-run writes neither the queue nor the flag queue
+                    fq2["flagged"][0]["status"] = "open"
+                    flag_path.write_text(json.dumps(fq2, indent=2) + "\n", encoding="utf-8")
+                    dry_queue = td / "dry_queue.json"
+                    rc = curator.main(["--queue", str(dry_queue), "--dry-run"])
+                    assert rc == 0, rc
+                    assert not dry_queue.exists(), "dry-run must not write the queue"
+                    fq3 = json.loads(flag_path.read_text(encoding="utf-8"))
+                    assert fq3["flagged"][0]["status"] == "open", fq3  # not back-filled
+        finally:
+            try:
+                cleanup_test_rows()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
 
@@ -580,11 +965,20 @@ NO_DB_TESTS = (
     test_audit_edges_md5_sample_sql,
     test_sync_notes_skips_hidden_dirs,
     test_extract_url_pinned_resolution,
+    test_extract_gate_refuses_non_allowlisted_host,
+    test_extract_gate_allowlisted_host_posts_and_logs_event,
+    test_extract_gate_unset_is_noop,
+    test_extract_gate_fails_closed_when_audit_module_missing,
+    test_vision_gate_refuses_non_allowlisted_host,
+    test_vision_gate_allowlisted_host_posts_and_logs_event,
+    test_youtube_ingest_logs_external_fetch,
+    test_review_decision_flag_id_is_queue_only,
 )
 
 DB_TESTS = (
     test_review_decision_queue_and_db,
     test_store_raw_pdf_stores_file_bytes,
+    test_curator_flag_queue_pickup_and_backfill,
 )
 
 
