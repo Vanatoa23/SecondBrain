@@ -1,0 +1,290 @@
+[
+  {
+    "id": "doc-01",
+    "title": "Aurora-7 solar storm early-warning constellation",
+    "source_uri": "golden://doc-01",
+    "text": "The aurora-7 constellation is a network of twelve small satellites in low Earth orbit dedicated to early warning of solar storms. Each aurora-7 satellite carries a magnetometer, a solar wind particle detector, and an X-ray flux monitor. When a coronal mass ejection leaves the Sun, aurora-7 detects the shock front roughly forty to sixty minutes before it reaches Earth, giving power grid operators time to shed nonessential load and protect large transformers. The aurora-7 project began in 2031 at the University of Tromso and is now operated by an international consortium, and its data is published openly within five minutes of collection. During the March 2044 storm, aurora-7 gave a fifty-two minute warning, and grid operators credit the constellation with preventing an estimated four billion dollars in transformer damage across Scandinavia. The satellites weigh only eighty kilograms each and are launched in groups of four on small rockets. aurora-7 also runs a citizen-science component in which ham radio operators can request raw magnetometer data for their own research. The next upgrade, planned for 2048, will add a coronagraph to each aurora-7 satellite so the constellation can image coronal mass ejections while they are still leaving the Sun, extending the warning time to nearly two hours.",
+    "marker": "aurora-7"
+  },
+  {
+    "id": "doc-02",
+    "title": "Quasar-12 deep-sea nodule collection rover",
+    "source_uri": "golden://doc-02",
+    "text": "The quasar-12 rover is an autonomous machine designed to collect polymetallic nodules from the Clarion-Clipperton Zone of the Pacific Ocean at a depth of 4500 meters. Unlike earlier mining systems that vacuumed the seafloor, quasar-12 uses a row of gentle robotic fingers to pick individual nodules, leaving the sediment layer largely intact. This matters because the nodules grow extremely slowly, only millimeters per million years, and the surrounding sediment hosts unique ecosystems that take centuries to recover. quasar-12 is powered by a pressure-tolerant lithium battery pack and surfaces every eighteen hours to swap batteries at a floating support ship. Its cameras and sonar map each nodule before collection, and the onboard computer rejects anything smaller than a fist to avoid wasted trips. During its 2046 trial, quasar-12 collected 120 tons of nodules while disturbing less than two percent of the seafloor it passed over. The collected nodules are rich in manganese, cobalt, and nickel, metals needed for batteries. Environmental groups remain cautious, and the quasar-12 project publishes its dive logs openly so regulators and researchers can audit every collection site.",
+    "marker": "quasar-12"
+  },
+  {
+    "id": "doc-03",
+    "title": "Nimbus-4 rooftop vertical farm cooperative",
+    "source_uri": "golden://doc-03",
+    "text": "nimbus-4 is a rooftop vertical farming cooperative on the edge of Rotterdam. The farm occupies the top six floors of a former office tower and grows leafy greens, tomatoes, and herbs in stacked hydroponic trays under full-spectrum LED light. Rainwater collected from the roof and condensed humidity supply most of the irrigation, so nimbus-4 uses about ninety-five percent less water than a field farm growing the same crops. The cooperative is owned by 140 households in the neighborhood, each of which receives a weekly share of produce and can work shifts on the farm for a discount. Waste heat from the building server room warms the top floor in winter. nimbus-4 produces roughly 30 tons of vegetables a year within a five-kilometer delivery radius, so almost everything is eaten within hours of harvest and transported by cargo bike. The farm also runs a composting program that turns unsold produce and neighborhood food scraps into fertilizer for the trays. A small classroom on the ground floor teaches school groups about photosynthesis, hydroponics, and where food comes from. Membership in nimbus-4 currently has a two-year waiting list.",
+    "marker": "nimbus-4"
+  },
+  {
+    "id": "doc-04",
+    "title": "Zephyr-9 hand-crank emergency radio",
+    "source_uri": "golden://doc-04",
+    "text": "The zephyr-9 is a hand-crank emergency radio designed for households that want a communication device that works when the power grid is down. One minute of steady cranking on the zephyr-9 handle generates enough electricity to run the radio for about forty-five minutes of listening, or fifteen minutes of transmitting on the weather band. The radio covers AM, FM, shortwave, and the NOAA weather band, and it can also charge a phone through a small USB port: fifteen minutes of cranking adds roughly one hour of phone standby time. The zephyr-9 has no battery to degrade; its supercapacitor stores the cranked energy for years without leaking. The case is waterproof and buoyant, and the crank handle folds flat for storage in a drawer or a go-bag. Emergency planners recommend the zephyr-9 because it needs no fuel, no sun, and no disposable batteries. A hand-crank flashlight and a small solar panel are built into the same housing. The zephyr-9 costs about sixty dollars and carries a five-year warranty.",
+    "marker": "zephyr-9"
+  },
+  {
+    "id": "doc-05",
+    "title": "Tundra-2 permafrost carbon monitoring station",
+    "source_uri": "golden://doc-05",
+    "text": "The tundra-2 research station sits on the Siberian tundra 340 kilometers north of the Arctic Circle, where it continuously measures carbon release from thawing permafrost. Permafrost is soil that has stayed frozen for thousands of years, and it stores roughly twice as much carbon as the entire atmosphere. As the climate warms, microbes wake up in the thawed soil and release that carbon as carbon dioxide and methane. tundra-2 uses flux towers, soil probes at depths down to three meters, and a heated chamber that measures respiration from freshly thawed samples. In 2047 the station recorded the fastest permafrost thaw in its nineteen-year history: the active layer deepened by eleven centimeters in a single summer. tundra-2 data feeds directly into climate models, and its measurements are published in near real time. The station is powered by wind turbines and a small hydrogen fuel cell for the winter dark. Eight scientists rotate through tundra-2 in two-month shifts, and the station doubles as a classroom for Arctic ecology courses.",
+    "marker": "tundra-2"
+  },
+  {
+    "id": "doc-06",
+    "title": "Cinder-8 waste-heat-recovering brick kiln",
+    "source_uri": "golden://doc-06",
+    "text": "The cinder-8 kiln is a restored traditional brick kiln in Catalonia that now recovers waste heat to dry firewood and heat a community workshop. Brick kilns run at over 1000 degrees Celsius, and most of that heat used to escape up the chimney. cinder-8 added a heat exchanger around the flue: hot exhaust gases pass through a chamber where stacked firewood and clay molds are dried before firing, cutting wood consumption by about forty percent. The kiln fires every six weeks and produces bricks stamped with the cinder-8 mark, prized by restoration architects for their irregular color. Each firing is documented: clay source, firing curve, and the amount of recovered heat are logged and published. The workshop next to cinder-8 teaches apprentices bricklaying, and the recovered-heat dryer employs two people full time in winter. Local builders buy cinder-8 bricks for historic restoration because the kiln reproduces the softer, more porous bricks made by hand a century ago. The cinder-8 cooperative also sells its dried firewood at the farmers market.",
+    "marker": "cinder-8"
+  },
+  {
+    "id": "doc-07",
+    "title": "Harbor-5 tidal power microgrid",
+    "source_uri": "golden://doc-07",
+    "text": "harbor-5 is a tidal power microgrid serving a small fishing town on the Bay of Fundy, where the tide rises and falls more than twelve meters twice a day. Underwater turbines anchored in the channel spin in both directions, generating electricity on the incoming and the outgoing tide. Because tides are completely predictable, harbor-5 can schedule its generation years in advance, unlike solar or wind. A bank of batteries and a small hydrogen electrolyzer store surplus power at spring tides for use during neap tides, when the current is weaker. The microgrid keeps the town cold storage, clinic, and harbor lights running even when the main grid fails, and excess power is sold back to the provincial utility. harbor-5 was commissioned in 2041 and has run at ninety-seven percent uptime since. Its turbines are designed to let fish pass safely, and hydrophones monitor for whales. The town holds an annual festival on the two days a year when the turbines are shut down for maintenance and the channel is quiet.",
+    "marker": "harbor-5"
+  },
+  {
+    "id": "doc-08",
+    "title": "Moss-6 mycelium insulation panels",
+    "source_uri": "golden://doc-08",
+    "text": "moss-6 is a building insulation panel made from agricultural waste and mushroom mycelium. Wheat straw and husks are mixed with mycelium spores and packed into a mold, where the fungus grows through the biomass in about a week and binds it into a solid, lightweight panel. The panels are then dried to stop growth, which leaves a material that is naturally fire resistant, mold resistant, and insulating. A moss-6 panel achieves an R-value of about 3.5 per inch, comparable to fiberglass, but it is grown rather than manufactured, using a fraction of the energy and no toxic binders. At the end of a building's life, moss-6 panels can simply be composted. The moss-6 factory in Ghent employs forty people and supplies insulation for social housing projects across Belgium and the Netherlands. Panels are cut to size with a normal saw and installed like standard insulation batts. Builders report that walls insulated with moss-6 stay cooler in summer and warmer in winter, and the material absorbs sound better than synthetic alternatives.",
+    "marker": "moss-6"
+  },
+  {
+    "id": "doc-09",
+    "title": "Drift-11 ocean plastic collection fleet",
+    "source_uri": "golden://doc-09",
+    "text": "drift-11 is a fleet of twenty autonomous barges that collect plastic waste from the North Pacific gyre. Each barge is a sixty-meter catamaran with a conveyor belt stretched between its hulls that skims floating debris from the surface as the barge moves slowly through the water. Onboard sorting separates plastic from seaweed and fish, and a compactor bales the plastic. When a barge is full it returns to port on its own, guided by GPS, and the bales are sent to recycling facilities. In 2047 the drift-11 fleet collected 8400 tons of plastic, about a third of it fishing gear and the rest packaging and bottles. The barges are solar-electric and move at five knots, slow enough that most marine animals can avoid them; spotters and cameras halt the conveyor if a turtle or seal approaches. drift-11 publishes the GPS track of every barge and the weight of everything collected, so the cleanup can be verified independently. Critics note that collection alone will not solve ocean plastic, and the drift-11 team agrees: the fleet is a stopgap while production of single-use plastic is reduced.",
+    "marker": "drift-11"
+  },
+  {
+    "id": "doc-10",
+    "title": "Forge-3 community blacksmith workshop",
+    "source_uri": "golden://doc-10",
+    "text": "forge-3 is a community blacksmith workshop in a former railway depot, open to members three days a week. The workshop has six coal forges, two gas forges, and a power hammer, plus anvils, tongs, and hand tools that members can borrow. Experienced smiths teach beginners how to draw out a bar, punch a hole, forge a leaf, and heat-treat a blade. Members pay a small monthly fee and can use the shop for their own projects, from gate hinges to kitchen knives. forge-3 runs a repair cafe once a month where neighbors bring broken tools and furniture for free mending, and it runs a summer camp for teenagers who learn to forge their own tent stakes and fire pokers. The workshop sells finished work by members at a seasonal market, and the proceeds fund new equipment. Because coal smoke is a concern, forge-3 installed a powerful extraction system, and the gas forges burn propane with low emissions. The depot's original overhead crane still hangs from the ceiling and is used to move heavy anvils and stock. Membership in forge-3 includes a locker and a free sharpening service for garden tools.",
+    "marker": "forge-3"
+  },
+  {
+    "id": "doc-11",
+    "title": "Lumen-10 fiber-optic solar lighting",
+    "source_uri": "golden://doc-11",
+    "text": "lumen-10 is a low-cost daylighting system that brings sunlight into windowless rooms using plastic optical fiber. A small rooftop collector tracks the sun and focuses its light into a bundle of fibers, each as thin as a strand of spaghetti, which carry the light up to thirty meters into the building. Inside, the fibers end in ceiling fixtures that glow like lamps, delivering real sunlight rather than electric light. A lumen-10 kit costs about two hundred dollars and can light a classroom, a clinic room, or a hallway all day with no electricity at all. Because the system passes only visible light and blocks infrared, rooms lit by lumen-10 stay cooler than rooms with electric lamps or direct sun. The fibers are flexible and can be routed through walls like wiring. In a pilot project in off-grid villages in Senegal, lumen-10 kits cut kerosene lamp use by eighty percent, and families reported that children could read and do homework after dark more safely. The rooftop collector needs occasional cleaning, and the fibers last about twenty years before yellowing.",
+    "marker": "lumen-10"
+  },
+  {
+    "id": "doc-12",
+    "title": "Pepper-7 heirloom chili seed bank",
+    "source_uri": "golden://doc-12",
+    "text": "The pepper-7 seed bank preserves 1300 heirloom varieties of chili pepper in a climate-controlled vault outside Oaxaca, Mexico. Chili peppers originated in Mesoamerica thousands of years ago, and farmers selected hundreds of distinct varieties for flavor, heat, and drying, but many were lost as commercial hybrids spread. pepper-7 collects seeds from farming villages, grows each variety in isolation to keep it pure, and stores the dried seeds at minus twenty degrees Celsius, where they remain viable for decades. Every pepper-7 variety is documented with its name, village of origin, heat level, and a story: the chocolate habanero grown for mole, the tiny chiltepin picked wild in the mountains, the smoky chilhuacle used in Oaxacan black mole. The seed bank lends seeds free to any farmer who asks, on the condition that they save and return seed from their harvest, keeping the varieties alive in the field. pepper-7 also runs a tasting table each October where visitors sample sauces made from rare varieties and vote on their favorites. Plant breeders use pepper-7 material to develop peppers that resist drought and disease.",
+    "marker": "pepper-7"
+  },
+  {
+    "id": "doc-13",
+    "title": "Granite-14 3D-printed lunar regolith habitat",
+    "source_uri": "golden://doc-13",
+    "text": "granite-14 is an experimental habitat module built from 3D-printed lunar regolith, tested in the Atacama Desert as a stand-in for the Moon. The printer is a large robotic arm that lays down successive layers of a mixture of crushed basalt, simulated regolith, and a magnesium-based binder, building walls three meters thick in a single dome shape. Those thick walls shield inhabitants from radiation and micrometeorites, the two main hazards on the lunar surface. Inside, granite-14 has 120 square meters of living space for four astronauts, with inflatable partitions dividing sleeping quarters, a laboratory, and a greenhouse module. Water for the printer binder comes from ice mined at the lunar south pole, and oxygen is produced by electrolysis of regolith oxides in a test unit attached to the habitat. During the 2046 simulation, a crew of four lived inside granite-14 for thirty days, growing lettuce and tomatoes in the greenhouse and recycling all of their water. The walls kept the interior at a steady twenty degrees despite outside temperatures swinging from minus eighty to plus one hundred degrees. granite-14 is a key step toward permanent lunar bases planned for the 2030s.",
+    "marker": "granite-14"
+  },
+  {
+    "id": "doc-14",
+    "title": "Willow-6 constructed greywater wetland",
+    "source_uri": "golden://doc-14",
+    "text": "willow-6 is a constructed wetland that treats the greywater of a village of 800 people using only plants, gravel, and gravity. Greywater from sinks, showers, and washing machines flows into a settling tank, then through a series of planted gravel beds where willows, reeds, and rushes take up nutrients and microbes break down soap and food residues. By the time the water leaves the last bed it is clean enough to irrigate the village orchard and to return to the stream. willow-6 was built in 2039 for about the cost of a single conventional treatment plant's annual maintenance, and it has almost no operating cost because it needs no chemicals and only one pump. The willows are coppiced every winter and the rods are woven into baskets and fences by the village cooperative, which earns a small income from the wetland. Students from the regional college monitor water quality monthly, testing for nitrogen, phosphorus, and bacteria. In summer willow-6 is also a habitat for dragonflies, frogs, and birds, and a boardwalk lets visitors walk through the reed beds without disturbing the water flow.",
+    "marker": "willow-6"
+  },
+  {
+    "id": "doc-15",
+    "title": "Ember-2 wildfire lookout tower network",
+    "source_uri": "golden://doc-15",
+    "text": "The ember-2 network is a chain of forty staffed fire lookout towers across the mountainous west, each one crewed from May through October. Lookouts climb the towers each morning and scan the horizon with an Osborne fire finder, a rotating sighting device that gives the exact compass bearing of any smoke. A sighting is radioed to the dispatch center, and two towers triangulate to pin down a precise location, often before any hiker or pilot reports the fire. Because lookouts live on the towers all summer, they detect fires in remote wilderness within minutes, while the fires are still small and cheap to extinguish. The ember-2 program began in the 1920s and was nearly shut down in the 1990s when satellites and aircraft took over, but it was kept because lookouts spot fires that satellites miss under forest canopy and because aircraft are not always flying. Modern ember-2 towers have solar panels, a radio repeater, and a rainwater tank, but the fire finder and the trained human eye remain the core of the system. Last season ember-2 lookouts reported 340 fires, and every one was contained before it burned more than ten hectares.",
+    "marker": "ember-2"
+  },
+  {
+    "id": "doc-16",
+    "title": "Vantage-8 transit survey of small exoplanets (paper PDF)",
+    "source_uri": "pdf://papers/vantage8-transit-survey.pdf",
+    "marker": "vantage-8",
+    "text": "Title: The vantage-8 transit survey of small exoplanets. Abstract: The vantage-8 survey monitored 40,000 nearby M-dwarf stars for two years with a 0.4-meter space telescope, searching for the small dips in starlight caused when a planet crosses in front of its star. vantage-8 detected 212 candidate planets smaller than twice Earth's diameter, of which 31 orbit in the habitable zone where liquid water could exist on a rocky surface. The best-studied world, vantage-8 d, circles its star every 9.2 days at a distance of 0.06 astronomical units and has an estimated equilibrium temperature of 260 kelvin. The vantage-8 team published every light curve openly, and independent groups have confirmed 174 of the candidates with radial-velocity measurements. The survey's main conclusion is that small planets around small stars are common: roughly one in three M-dwarfs hosts a planet below 1.5 Earth radii. Section 4 of the paper puts the vantage-8 false-positive rate at 6 percent, mostly eclipsing binary stars."
+  },
+  {
+    "id": "doc-17",
+    "title": "Sonar-5 lecture transcript - forecasting coral spawning",
+    "source_uri": "audio://recordings/sonar5-lecture.mp3",
+    "marker": "sonar-5",
+    "text": "Transcript of the sonar-5 lecture on forecasting coral spawning, recorded in March 2047. [00:00] Welcome. The sonar-5 model predicts mass coral spawning on the Great Barrier Reef up to five days in advance. [00:41] It combines three inputs: sea surface temperature, the lunar cycle, and offshore wind speed. [01:30] Spawning happens a few nights after the full moon, when the water is warm and calm. [02:10] In 2047 sonar-5 issued 38 spawning forecasts and 36 of them verified, an accuracy of 95 percent. [03:05] The model runs on an ordinary laptop and costs nothing to operate, which is why sonar-5 is used by reef tourism operators to schedule night dives and by researchers to time larval collection. [04:00] The next sonar-5 upgrade will add satellite chlorophyll data so the model can also forecast spawning on outer reefs."
+  },
+  {
+    "id": "doc-18",
+    "title": "Fjord-4 video transcript - how glaciers carve fjords",
+    "source_uri": "youtube://watch?v=fjord4video",
+    "marker": "fjord-4",
+    "text": "YouTube transcript of the video 'How glaciers carve fjords' from the fjord-4 channel. [00:12] A fjord begins as an ordinary river valley. [00:20] A glacier grinds down through the valley over thousands of years, cutting a steep U-shaped cross-section instead of the V-shape a river makes. [00:55] When the climate warms and the glacier retreats, the sea floods the over-deepened valley and a fjord is born. [01:20] Many fjords are deeper than 1000 meters. The deepest known, the fjord-4 namesake Skelton Inlet, reaches 1900 meters below sea level while the land around it rises only 300 meters. [02:00] A shallow sill at the fjord mouth, left where the glacier eroded less near the sea, traps cold deep water inside and keeps the fjord ecosystem isolated. [02:40] Fjords therefore stay cold and nutrient-rich long after the surface ocean warms."
+  },
+  {
+    "id": "doc-19",
+    "title": "Rivet-9 repository README (github file)",
+    "source_uri": "github://octo/rivet-9/blob/main/README.md",
+    "marker": "rivet-9",
+    "text": "Repository file README.md from github.com/octo/rivet-9, imported as a single knowledge item with provenance github://octo/rivet-9/blob/main/README.md. Content: '# rivet-9'. rivet-9 is a small command-line tool that converts hand-written workshop tally sheets into clean CSV files. Usage: python -m rivet9 tally.txt --out tally.csv. rivet-9 recognizes 14 tool categories, from tongs to anvils, and flags duplicate tally marks automatically. The rivet-9 test suite covers 96 cases and runs in under two seconds with no dependencies beyond the standard library. rivet-9 is released under the MIT license and accepts pull requests. New in rivet-9 version 3: export to spreadsheet format and a --check mode that reports transcription errors."
+  },
+  {
+    "id": "doc-20",
+    "title": "Coble-3 fishing boat design",
+    "source_uri": "golden://doc-20",
+    "marker": "coble-3",
+    "text": "The coble-3 is a clinker-built fishing boat whose design comes from the Yorkshire coast, where boats had to be launched and recovered through heavy surf every day. The coble-3 has a shallow, flat midsection and high, flaring bow and stern. That hull shape is what lets a single person drag a coble-3 through the breakers: the flat bottom slides over the foam instead of digging in, and the high ends keep the sea out. A coble-3 is usually 6 to 8 meters long, planked on oak frames, and can carry a crew of two plus a day's catch of haddock and cod. The coble-3 rig is a single lug sail that can be dropped in seconds when a squall hits. Because the boat is light, the crew can winch it up the beach above the tide line with a small block and tackle."
+  },
+  {
+    "id": "doc-21",
+    "title": "Lantern-6 lighthouse Fresnel lens",
+    "source_uri": "golden://doc-21",
+    "marker": "lantern-6",
+    "text": "The lantern-6 is the great rotating Fresnel lens at the top of the Hatter lighthouse, installed in 1848 and still in service. The lantern-6 lens stands 3.5 meters tall and is built from 1008 prisms of hand-ground glass arranged in a honeycomb of panels around the lamp. Each panel bends the light into a strong horizontal beam, and the whole lens rotates on a mercury bath so the beam sweeps the horizon. The lantern-6 produces a characteristic flash every 10 seconds, and in clear weather its beam is visible 40 kilometers out to sea. The lantern-6 was converted from whale oil to electric light in 1952, but the original prisms were kept, and the lens is still wound by hand every evening by the keeper."
+  },
+  {
+    "id": "doc-22",
+    "title": "Delta-8 levee setback project",
+    "source_uri": "golden://doc-22",
+    "marker": "delta-8",
+    "text": "The delta-8 project is a levee setback on the lower River Alder: instead of raising the old embankment, engineers moved it 400 meters back from the river and let the floodplain reconnect. delta-8 reconnected 900 hectares of former farmland to the river's annual flood, which lowered flood peaks in the town of Alder by 35 centimeters. The reconnected ground was planted with 60,000 native trees and now acts as a wetland that filters fertilizer runoff before it reaches the estuary. delta-8 cost about the same as one conventional levee raise, but it also created public walking trails and a spawning marsh for fish. Monitoring over five years shows the delta-8 floodplain absorbs a flood of the size seen in 2039 with room to spare."
+  },
+  {
+    "id": "doc-23",
+    "title": "Spindle-5 wool carding machine",
+    "source_uri": "golden://doc-23",
+    "marker": "spindle-5",
+    "text": "The spindle-5 is an 1889 wool carding machine at the Wassdale mill museum, still driven by the mill's water wheel. Raw sheep fleece arrives at the spindle-5 dirty and full of burrs. The machine's two large drums, covered in fine wire teeth, pull the fleece apart and align the fibers into a soft continuous rope called a sliver. The spindle-5 turns out about 30 kilograms of sliver an hour, which is then spun into yarn on the mill's mule frames. Visitors can watch the spindle-5 from the gallery, and on open days the mill runs a demonstration fleece-to-sliver run every hour. The spindle-5's original leather belts were replaced in 1974 but the cast-iron frame is untouched."
+  },
+  {
+    "id": "doc-24",
+    "title": "Kestrel-4 nest box program",
+    "source_uri": "golden://doc-24",
+    "marker": "kestrel-4",
+    "text": "The kestrel-4 program puts nest boxes on farmland to bring kestrels back for rodent control. Kestrels hunt by hovering over grassland, and each kestrel-4 box is a wooden cavity mounted on a pole 4 meters high, facing open ground away from trees. In 2047 the kestrel-4 network counted 1200 boxes across three counties, and 61 percent of them were occupied by breeding pairs. Farms with a kestrel-4 box used 40 percent less rodenticide, because a single kestrel family eats about three voles a day. The kestrel-4 volunteers check each box once a year in winter and record the prey remains, which has made the kestrel-4 dataset one of the longest-running raptor diet studies in the country."
+  },
+  {
+    "id": "doc-25",
+    "title": "Orchard-9 heritage apple grafting",
+    "source_uri": "golden://doc-25",
+    "marker": "orchard-9",
+    "text": "Orchard-9 is a heritage apple collection that preserves 90 old apple varieties by grafting. Each winter, orchard-9 takes one-year-old scion sticks from its mother trees and grafts them onto hardy rootstock using the whip-and-tongue technique: a slanted cut on both pieces, fitted together and bound with tape. In spring the orchard-9 nursery rows fill with the grafted whips, and by autumn each has grown into a young tree ready to plant out. Varieties kept alive by orchard-9 include Ashmead's Kernel, Egremont Russet, and the lost Winter Banana. The orchard-9 grafting days are open to the public, and every visitor grafts one tree to take home."
+  },
+  {
+    "id": "doc-26",
+    "title": "Beacon-3 hilltop signal chain",
+    "source_uri": "golden://doc-26",
+    "marker": "beacon-3",
+    "text": "The beacon-3 chain is a restored line of twelve hilltop signal beacons that once carried warnings across the county in the 1500s. Each beacon-3 site has a stone platform and an iron brazier on a pole; when a warning was needed, the keeper lit the brazier and the next hilltop down answered within minutes. A message could travel the whole beacon-3 chain, about 200 kilometers, in under an hour, faster than any horse. The beacon-3 chain was abandoned in 1850 when the electric telegraph arrived, but in 2040 volunteers cleared the sites and rebuilt the braziers. Every summer solstice the beacon-3 society lights all twelve fires in sequence as a demonstration."
+  },
+  {
+    "id": "doc-27",
+    "title": "Thicket-7 hedgerow wildlife corridor",
+    "source_uri": "golden://doc-27",
+    "marker": "thicket-7",
+    "text": "The thicket-7 corridor is a 40-kilometer network of hedgerows planted to connect the two largest remaining woodlands in the county. Each thicket-7 hedgerow is planted with native hawthorn, blackthorn, hazel, and dog rose, with a grass strip at the base for ground-nesting birds. Since the first thicket-7 hedges went in, dormice have been recorded in the corridor for the first time in fifty years, and the number of breeding bird species along the route has risen from 22 to 34. Farmers who plant a thicket-7 hedgerow receive a grant and a free hedge-laying workshop. The thicket-7 standard requires hedges to be laid, not flailed, every seven years to keep them dense at the base."
+  },
+  {
+    "id": "doc-28",
+    "title": "Plum-2 dam removal",
+    "source_uri": "golden://doc-28",
+    "marker": "plum-2",
+    "text": "The plum-2 dam was a 14-meter-high concrete dam on the River Plum that was removed in 2046 after 90 years of blocking fish. Within a year of the plum-2 removal, Atlantic salmon were spawning upstream again, and 60 kilometers of spawning habitat were reopened. The plum-2 reservoir had silted up, so removal cost less than repair, and the river returned to a natural pool-and-riffle pattern within two spring floods. The plum-2 project is now a teaching case: engineers photographed the channel every month for three years and published the data. Herons and kingfishers increased along the restored reach, and the town of Plumbridge replaced the dam's picnic area with a riverside trail."
+  },
+  {
+    "id": "doc-29",
+    "title": "Anchor-6 storm mooring",
+    "source_uri": "golden://doc-29",
+    "marker": "anchor-6",
+    "text": "The anchor-6 is a storm mooring design for small boats, tested in the North Sea in 2047. An anchor-6 mooring uses a 25-kilogram steel anchor buried two meters deep in the seabed by a water jet, connected to a heavy chain and a surface buoy. In tank tests the anchor-6 held a 10-meter boat in winds of 60 knots without dragging. Because the anchor-6 sits below the seabed, it does not chafe in a storm and does not need a long scope of chain on deck. The anchor-6 design was published openly by the co-op that developed it, and insurers now give a discount to boats that use an anchor-6 mooring in exposed harbors."
+  },
+  {
+    "id": "doc-30",
+    "title": "Vault-4 underground archive",
+    "source_uri": "golden://doc-30",
+    "marker": "vault-4",
+    "text": "The vault-4 archive stores paper backups of the region's most important records in a former salt mine 300 meters underground. The vault-4 tunnels are dry and thermally stable: the temperature stays at a constant 8 degrees Celsius year-round, and the humidity stays below 40 percent, which is ideal for paper and photographic film. Vault-4 holds 40,000 boxes arranged on steel shelving along 2 kilometers of tunnel, with a reading room at the surface where documents are scanned rather than removed. The vault-4 salt mine was chosen because salt rock creeps slowly and seals cracks by itself, keeping the tunnels watertight without pumps. Access to vault-4 is by appointment, and every box is tracked in a paper ledger as well as the digital catalog."
+  },
+  {
+    "id": "docMH1",
+    "title": "Collim-5qp2w Newtonian telescope collimation",
+    "source_uri": "golden://mh-1",
+    "text": "The collim-5qp2w method is my routine for aligning the mirrors of an amateur Newtonian telescope. First I center the secondary mirror under the focuser drawtube, then I adjust the three primary tilt screws at the back of the tube while watching a bright defocused star, iterating until the diffraction rings around the star look perfectly concentric. The collim-5qp2w check passes when the dark shadow of the secondary sits dead center inside the rings at high power. I repeat the collim-5qp2w procedure after every car trip to the dark site, because transport knocks the primary cell out of alignment.",
+    "marker": "collim-5qp2w",
+    "links": [
+      {
+        "to": "docMH2",
+        "type": "relates_to",
+        "strength": 0.9,
+        "direction": "out",
+        "context": "planted golden chain 1: telescope collimation -> sourdough starter"
+      }
+    ]
+  },
+  {
+    "id": "docMH2",
+    "title": "Levain-8hd3m sourdough starter schedule",
+    "source_uri": "golden://mh-2",
+    "text": "My levain-8hd3m sourdough starter follows a strict twice-daily feeding rhythm at a warm room temperature. Each morning and evening I discard all but a spoonful of the levain-8hd3m, then feed it equal parts flour and water by weight, stirring well. The levain-8hd3m is ready to bake with when the dome has just collapsed after its peak, usually four to six hours after feeding. If I go away for a weekend I store the levain-8hd3m in the fridge and feed it once a week.",
+    "marker": "levain-8hd3m",
+    "links": [
+      {
+        "to": "docMH3",
+        "type": "relates_to",
+        "strength": 0.85,
+        "direction": "out",
+        "context": "planted golden chain 1: sourdough starter -> apiary"
+      }
+    ]
+  },
+  {
+    "id": "docMH3",
+    "title": "Apiary-6tn4c beekeeping varroa management",
+    "source_uri": "golden://mh-3",
+    "text": "The apiary-6tn4c hives sit behind the orchard wall, facing southeast. Each spring I count the apiary-6tn4c mite load with an alcohol wash of half a cup of bees, and if the count is above three percent I treat with oxalic acid vaporization in the evening when all foragers are home. I requeen the apiary-6tn4c colonies every two years, split the strong ones in June, and feed fondant only when the supers are empty and the weather is cold.",
+    "marker": "apiary-6tn4c"
+  },
+  {
+    "id": "docMH4",
+    "title": "Salinity-2vk7r reef aquarium refractometer calibration",
+    "source_uri": "golden://mh-4",
+    "text": "The salinity-2vk7r routine keeps my reef tank stable: I calibrate the refractometer every month against a 35 ppt reference solution at the tank temperature, and I top up evaporation with RODI water only, never tap water. The salinity-2vk7r method holds the tank within half a ppt of the 35 ppt target, because sudden swings cause osmotic shock on the corals. I record each salinity-2vk7r reading in the tank logbook along with the water temperature at the time of measurement.",
+    "marker": "salinity-2vk7r",
+    "links": [
+      {
+        "to": "docMH5",
+        "type": "relates_to",
+        "strength": 0.9,
+        "direction": "out",
+        "context": "planted golden chain 2: reef salinity -> manuscript ink"
+      }
+    ]
+  },
+  {
+    "id": "docMH5",
+    "title": "Gallink-3md8s iron gall ink for manuscripts",
+    "source_uri": "golden://mh-5",
+    "text": "Gallink-3md8s is the iron gall ink I cook for manuscript repair work: crushed oak galls simmer in rainwater for an hour, the liquid is strained, then ferrous sulfate and gum arabic are dissolved in. The gallink-3md8s ink darkens from brown to permanent black as it oxidizes on the page. I always test a drop of gallink-3md8s on spare paper first, and I never apply it to parchment that still has surface sizing, because the acid can eat through the skin.",
+    "marker": "gallink-3md8s",
+    "links": [
+      {
+        "to": "docMH6",
+        "type": "relates_to",
+        "strength": 0.85,
+        "direction": "out",
+        "context": "planted golden chain 2: manuscript ink -> letterpress"
+      }
+    ]
+  },
+  {
+    "id": "docMH6",
+    "title": "Press-7tn4c letterpress platen press maintenance",
+    "source_uri": "golden://mh-6",
+    "text": "The press-7tn4c is my 1962 platen letterpress: a heavy cast-iron frame with a hinged platen that closes onto the type bed with a satisfying clunk. Before each press-7tn4c run I check the oil ports on the main shaft, lay a fresh tympan sheet over the packing, and set the impression screws so the platen pressure is even across the forme. After printing I clean the press-7tn4c rollers with citrus solvent, lock the platen open with the prop arm, and sweep the floor, because metal type and chipped lead are a hazard underfoot. The press-7tn4c prints sharpest at moderate speed with fresh rollers.",
+    "marker": "press-7tn4c"
+  }
+]
