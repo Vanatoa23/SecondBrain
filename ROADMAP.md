@@ -90,19 +90,19 @@ Based on the research, we're building a **PostgreSQL-centric hybrid system** wit
 
 **Progress 2026-11-27 (PUBLISHED): entire Phases 1-4 system pushed to GitHub Vanatoa23/SecondBrain** — PR #1 https://github.com/Vanatoa23/SecondBrain/pull/1 merged into main (merge commit 3f7908b; branch pm-autonomous-work; 88 files in 4 commits; verified on main: full tree + spot-checked schema/tests/README). Docs-only PR #2 carries the PM_LEDGER publish entry. Autonomous PM loop complete; cron cancelled.
 
-### Phase 5: Multi-Agent Integration (Weeks 33-44)
+### Phase 5: Multi-Agent Integration (Weeks 33-44) — COMPLETE 2026-11-27 (merged PR #4, `1791518`)
 **Goal**: Full agent ecosystem
 
-- [ ] Write-scope MCP for trusted agents
-- [ ] flag_issue tooling
-- [ ] Per-project context packages
-- [ ] Permissions and audit logging
-- [ ] Multiple agent runtimes (Claude Code + local agent)
-- [ ] New project auto-retrieval of relevant knowledge
-- [ ] Zero critical data leaves without approval event
-- [ ] **Acceptance**: Two different agents retrieve and flag without conflicts
+- [x] Write-scope MCP for trusted agents
+- [x] flag_issue tooling
+- [x] Per-project context packages
+- [x] Permissions and audit logging
+- [x] Multiple agent runtimes (Claude Code + local agent)
+- [x] New project auto-retrieval of relevant knowledge
+- [x] Zero critical data leaves without approval event
+- [x] **Acceptance**: Two different agents retrieve and flag without conflicts
 
-**Progress 2026-11-27 (Phase 5 implemented, OPEN PR — not merged yet):** read/write MCP scopes (`SECONDBRAIN_MCP_SCOPE`, write scope gated by `SECONDBRAIN_WRITE_TOKEN`), `flag_issue` into the `flagged_issues.json` quarantine queue (never the KB; curator merges it into the review queue as `flagged-issue` with decision back-fill), `project_context`/`discover_relevant` per-project context packages, append-only `audit_log.jsonl` with fingerprints-only, external-send approval gate (`SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL` + allowlist, dual-parser hardened, redirects re-gated, fail-closed) on all EXTRACT/VISION POSTs. Double independent audit clean after fix batch (backslash-userinfo bypass, raw-URL logging, redirect bypass, dream read-scope bypass, queue-write races all fixed). `tests/test_phase5_acceptance.py` ALL PASS (two MCP runtimes retrieve + flag without conflicts, quarantine idempotent, audit events, gate). See PM_LEDGER [2026-11-27] Phase 5 entries + the PR.
+**Progress 2026-11-27 (Phase 5 MERGED — PR #4, commit `1791518`):** read/write MCP scopes (`SECONDBRAIN_MCP_SCOPE`, write scope gated by `SECONDBRAIN_WRITE_TOKEN`), `flag_issue` into the `flagged_issues.json` quarantine queue (never the KB; curator merges it into the review queue as `flagged-issue` with decision back-fill), `project_context`/`discover_relevant` per-project context packages, append-only `audit_log.jsonl` with fingerprints-only, external-send approval gate (`SECONDBRAIN_REQUIRE_EXTERNAL_APPROVAL` + allowlist, dual-parser hardened, redirects re-gated, fail-closed) on all EXTRACT/VISION POSTs. Double independent audit clean after fix batch. `tests/test_phase5_acceptance.py` ALL PASS (two MCP runtimes retrieve + flag without conflicts, quarantine idempotent, audit events, gate). See PM_LEDGER [2026-11-27] Phase 5 entries.
 
 ### Phase 6: Proactive Intelligence (Ongoing)
 **Goal**: System that surfaces insights

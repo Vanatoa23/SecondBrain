@@ -1,0 +1,33 @@
+# Second Brain — Local PostgreSQL + pgvector stack
+#
+# Usage:
+#   cp .env.example .env          # optional: customize password/port
+#   docker compose up -d          # starts Postgres with persistent volume + schema
+#   docker compose ps             # verify healthy
+#   docker compose down           # stops container (data persists in named volume)
+#
+# Security: binds 127.0.0.1 only (loopback) so the database is never exposed to the LAN.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: secondbrain-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-secondbrain}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - secondbrain_pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-secondbrain}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  secondbrain_pgdata:
+    name: secondbrain_pgdata

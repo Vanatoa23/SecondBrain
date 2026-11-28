@@ -22,6 +22,15 @@
 
 ---
 
+## [2026-11-27 23:30] PRIORITY+PROCESS: Local-ops & dogfooding hardening (Option A) ahead of Phase 6
+- **Decided by**: User (selected Option A: harden local daily-driver ops & dogfood on real corpus before building Phase 6)
+- **Rationale**: Phases 0–5 are merged on `main` (`1791518`), but had only been validated on synthetic/golden fixtures and lacked persistent Docker Compose setup, `.env.example`, a read-only readiness checker, scheduled maintenance templates, and upper-bounded Python dependency constraints. Building Phase 6 (digests, cross-project suggestions, gap reports) after running one real-corpus loop ensures proactive intelligence is tuned to real graph signals rather than synthetic heuristics.
+- **Impact**: Added `docker-compose.yml` (loopback `127.0.0.1` binding, persistent `secondbrain_pgdata` volume, healthcheck, auto-init `db/schema.sql`), `.env.example`, `scripts/doctor.py` + `tests/test_doctor.py`, `scripts/schedule/` (cron + Windows Task Scheduler `-WhatIf` helper), `QUICKSTART.md` (daily-driver + dogfooding checklist), major-version upper bounds in `requirements.txt`, updated `db/README.md`, and synced `ROADMAP.md` Phase 5 checkboxes after PR #4 merge (`1791518`).
+- **Related**: `docker-compose.yml`, `.env.example`, `scripts/doctor.py`, `tests/test_doctor.py`, `scripts/schedule/`, `QUICKSTART.md`, `requirements.txt`, `db/README.md`, `ROADMAP.md`
+- **Status**: Active
+
+---
+
 ## [2026-11-27 17:40] FEATURE+PROCESS: PHASE 5 IMPLEMENTED, reviewed, double-audited, fixed — PUBLISHED as OPEN PR #4 (pm-phase5, NOT merged)
 - **Decided by**: PM per User authorization [2026-11-27 14:20]
 - **Rationale**: Phase 5 delivered in the loop format: 4 workers (W1 bridge+audit.py+flag_issue+project_context+discover_relevant+log_audit, W2 mcp-server read/write scopes + token gate + examples, W3 external-send gate in extract/extractors + curator flag pickup, W4 test_phase5_acceptance e2e) -> 4 per-fix reviewers (large/high, all APPROVE) -> DOUBLE independent audit (audit-P5-A + audit-P5-B, no shared output) -> fix workers F-A/F-B closed every finding (HIGH: backslash-userinfo allowlist bypass in check_external_send, raw ingest URLs in external_fetch audit events, read-scope dream triggering curator writes; MEDIUM: redirect bypass of the LLM-POST gate, fail-open gate when audit unimportable, fixed-tmp/unlocked queue-write races, ungated default scope; LOW: log_event envelope override, sk- test dummies, host:port allowlist entries, queue-only review_decision ids, bridge_write outcome logging + awaited MCP audit) -> 1 reviewer verified all fixes (only residual: sk- dummies, fixed by PM) -> PM re-ran all affected suites one at a time on the final tree, all EXIT=0.

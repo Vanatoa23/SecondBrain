@@ -1,13 +1,19 @@
-psycopg[binary]>=3.2
-pgvector>=0.3
-sentence-transformers>=3.0
-pypdf>=5.0
-beautifulsoup4>=4.12
-requests>=2.32
-pytesseract>=0.3
-Pillow>=10.0
-numpy>=1.26
-faster-whisper>=1.1
+# Core database & retrieval
+psycopg[binary]>=3.2,<4
+pgvector>=0.3,<1
+sentence-transformers>=3.0,<6
+numpy>=1.26,<3
+
+# Text, web & PDF ingestion
+pypdf>=5.0,<7
+beautifulsoup4>=4.12,<5
+requests>=2.32,<3
+docling>=2.0,<3
+
+# Image OCR, audio & YouTube ingestion
+pytesseract>=0.3,<1
+Pillow>=10.0,<13
+faster-whisper>=1.1,<2
 av>=14,<17  # faster-whisper 1.2.x passes metadata_errors to av.open; removed in av>=17
 yt-dlp>=2024.1.1
-docling>=2.0
+
