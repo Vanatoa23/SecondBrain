@@ -1,0 +1,15 @@
+# Second Brain — Example user crontab (Linux / macOS)
+#
+# Edit REPO and PYTHON to match your local checkout, then add via `crontab -e`.
+# Reads DATABASE_URL from $REPO/.env (never put passwords directly in crontab).
+# Logs land in $REPO/logs/ (gitignored).
+
+SHELL=/bin/bash
+REPO=/path/to/SecondBrain
+PYTHON=/path/to/SecondBrain/.venv/bin/python
+
+# Nightly 03:00 — curator consolidation + Markdown wiki export
+0 3 * * * cd "$REPO" && mkdir -p logs && set -a && [ -f .env ] && source .env && set +a && "$PYTHON" scripts/curator.py >> logs/curator.log 2>&1 && "$PYTHON" scripts/export_wiki.py >> logs/wiki.log 2>&1
+
+# Weekly Sunday 04:00 — compressed logical Postgres backup (pg_dump -Fc)
+0 4 * * 0 cd "$REPO" && mkdir -p logs backups && set -a && [ -f .env ] && source .env && set +a && BACKUP_SOURCE_URL="$DATABASE_URL" BACKUP_DIR="$REPO/backups" ./scripts/backup.sh >> logs/backup.log 2>&1
